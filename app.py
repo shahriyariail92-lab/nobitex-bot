@@ -13,26 +13,26 @@ bot_state = {
     "price": 0.0,
     "rsi": 0.0,
     "in_position": False,
-    "logs": ["[System] Cloud Server Started. Waiting for user to activate bot..."]
+    "logs": ["[System] Server Started. Waiting for user to activate bot..."]
 }
-
-STOP_LOSS_PERCENT = 0.02 
-TAKE_PROFIT_PERCENT = 0.05
 
 def add_log(message):
     timestamp = time.strftime("%H:%M:%S")
     bot_state["logs"].insert(0, f"[{timestamp}] {message}")
     if len(bot_state["logs"]) > 10:
         bot_state["logs"].pop()
+    print(f"LOG: {message}") # چاپ در لاگ‌های Render برای عیب‌یابی
 
 def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=20):
     end_time = int(time.time())
     start_time = end_time - (limit * resolution * 60)
     url = f"https://apiv2.nobitex.ir/market/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.json().get('s') == 'ok': return res.json()['c']
-    except: pass
+    except Exception as e:
+        print(f"OHLC Error: {e}")
     return None
 
 def calculate_rsi(prices, period=14):
@@ -47,10 +47,14 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + (avg_gain / avg_loss)))
 
 def bot_logic_loop():
+    print(">>> BOT BACKGROUND THREAD STARTED <<<")
     while True:
+        print(f"Thread heartbeat. Active: {bot_state['is_active']}")
         if bot_state["is_active"]:
             try:
-                res_price = requests.get("https://apiv2.nobitex.ir/market/stats?srcCurrency=btc&dstCurrency=usdt", timeout=10).json()
+                url = "https://apiv2.nobitex.ir/market/stats?srcCurrency=btc&dstCurrency=usdt"
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                res_price = requests.get(url, headers=headers, timeout=10).json()
                 current_price = float(res_price['stats']['btc-usdt']['latest'])
                 bot_state["price"] = current_price
 
@@ -67,13 +71,22 @@ def bot_logic_loop():
                         bot_state["in_position"] = False
                     else:
                         add_log(f"Analyzing... Price: ${current_price:,.0f}, RSI: {rsi:.2f}")
+                else:
+                    print("Failed to get OHLC data")
             except Exception as e:
+                print(f"Loop Error: {e}")
                 add_log(f"Error: {e}")
         
         time.sleep(15)
 
-# شروع حلقه ربات در پس‌زمینه
-threading.Thread(target=bot_logic_loop, daemon=True).start()
+# 🌟 این بخش بسیار مهم است: شروع ترد دقیقاً بعد از اولین درخواست
+thread_started = False
+@app.before_request
+def start_background_thread():
+    global thread_started
+    if not thread_started:
+        threading.Thread(target=bot_logic_loop, daemon=True).start()
+        thread_started = True
 
 @app.route('/status', methods=['GET'])
 def get_status():
