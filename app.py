@@ -7,16 +7,24 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from google import genai
 from google.genai import types
+import groq
 import PIL.Image
 import io
+import base64
 
 app = Flask(__name__)
 CORS(app)
 
-# ================= تنظیمات هوش مصنوعی =================
+# ================= تنظیمات هوش مصنوعی (دوگانه) =================
+# سرویس اول: Gemini
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 if GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+
+# سرویس دوم (پشتیبان): Groq
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
+if GROQ_API_KEY:
+    groq_client = groq.Groq(api_key=GROQ_API_KEY)
 
 # ================= تنظیمات پیام‌رسان بله =================
 BALE_BOT_TOKEN = os.environ.get('BALE_BOT_TOKEN', '')
@@ -55,10 +63,8 @@ def add_log(message):
     db.session.commit()
     print(new_log)
 
-# تابع ارسال پیام به بله
 def send_bale_notification(message):
     if not BALE_BOT_TOKEN or not BALE_CHAT_ID:
-        print("Bale Token or Chat ID is missing.")
         return
     try:
         url = f"https://tapi.bale.ai/bot{BALE_BOT_TOKEN}/sendMessage"
@@ -104,20 +110,18 @@ def bot_logic_loop():
                     if close_prices:
                         rsi = calculate_rsi(close_prices)
                         
-                        # سیگنال خرید
                         if not state.in_position and rsi < 30:
                             msg = f"🚨 سیگنال خرید (BUY)!\nقیمت: ${current_price:,.0f}\nشاخص RSI: {rsi:.2f}"
                             add_log(f"BUY SIGNAL! RSI: {rsi:.2f}")
-                            send_bale_notification(msg)  # ارسال به بله
+                            send_bale_notification(msg)
                             state.in_position = True
                             state.entry_price = current_price
                             db.session.commit()
                             
-                        # سیگنال فروش
                         elif state.in_position and rsi > 70:
                             msg = f"🔻 سیگنال فروش (SELL)!\nقیمت: ${current_price:,.0f}\nشاخص RSI: {rsi:.2f}"
                             add_log(f"SELL SIGNAL! RSI: {rsi:.2f}")
-                            send_bale_notification(msg)  # ارسال به بله
+                            send_bale_notification(msg)
                             state.in_position = False
                             state.entry_price = 0.0
                             db.session.commit()
@@ -154,18 +158,16 @@ def toggle_bot():
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
 
+# 🔥 مسیر تحلیل با سیستم پشتیبان (Fallback)
 @app.route('/analyze', methods=['POST'])
 def analyze_chart():
-    # این بخش همان کدهای قبلی هوش مصنوعی است (بدون تغییر)
-    if not GEMINI_API_KEY:
-        return jsonify({"error": "API Key is missing in Render settings."}), 500
-    
     if 'image' not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
 
     try:
         file = request.files['image']
-        img = PIL.Image.open(io.BytesIO(file.read()))
+        img_bytes = file.read()
+        img = PIL.Image.open(io.BytesIO(img_bytes))
         
         prompt = """
         شما یک تحلیلگر تکنیکال ارشد و حرفه‌ای در بازار ارزهای دیجیتال هستید. 
@@ -181,12 +183,45 @@ def analyze_chart():
         
         لحن شما باید کاملاً حرفه‌ای، قاطع و راهگشا باشد.
         """
+
+        # 1. تلاش با سرویس اصلی (Gemini)
+        if GEMINI_API_KEY:
+            try:
+                response = gemini_client.models.generate_content(
+                    model='gemini-3.8-flash',
+                    contents=[prompt, img]
+                )
+                return jsonify({"analysis": response.text})
+            except Exception as e:
+                print(f"Gemini failed: {e}. Switching to Groq...")
+                # اگر گوگل خطا داد، به خط بعدی می‌رود (Groq)
         
-        response = client.models.generate_content(
-            model='gemini-3.8-flash',
-            contents=[prompt, img]
-        )
-        return jsonify({"analysis": response.text})
+        # 2. تلاش با سرویس پشتیبان (Groq)
+        if GROQ_API_KEY:
+            try:
+                # تبدیل عکس به فرمت Base64 برای Groq
+                base64_image = base64.b64encode(img_bytes).decode('utf-8')
+                
+                response = groq_client.chat.completions.create(
+                    model="llama-3.2-11b-vision-preview",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                            ]
+                        }
+                    ],
+                    temperature=0.5,
+                    max_tokens=1024
+                )
+                return jsonify({"analysis": response.choices[0].message.content})
+            except Exception as e:
+                print(f"Groq failed: {e}")
+                return jsonify({"error": "هر دو سرویس هوش مصنوعی در دسترس نیستند. لطفاً بعداً تلاش کنید."}), 500
+
+        return jsonify({"error": "هیچ کلید API تنظیم نشده است."}), 500
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
