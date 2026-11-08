@@ -173,15 +173,33 @@ def analyze_chart():
         if not GEMINI_API_KEY:
             return jsonify({"error": "کلید API گوگل تنظیم نشده است."}), 500
 
-        # استفاده از مدل جدید و معتبر Gemini 3.8 Flash
-        response = gemini_client.models.generate_content(
-            model='gemini-3.8-flash', 
-            contents=[prompt, img]
-        )
-        return jsonify({"analysis": response.text})
+        # 🔥 سیستم تلاش مجدد خودکار (تا ۳ بار)
+        max_retries = 3
+        last_error = ""
+        
+        for attempt in range(max_retries):
+            try:
+                response = gemini_client.models.generate_content(
+                    model='gemini-3.8-flash', 
+                    contents=[prompt, img]
+                )
+                return jsonify({"analysis": response.text})
+            except Exception as e:
+                last_error = str(e)
+                # اگر خطای 503 (شلوغی) بود، ۳ ثانیه صبر کن و دوباره تلاش کن
+                if "503" in last_error or "UNAVAILABLE" in last_error:
+                    print(f"Attempt {attempt+1} failed (Google Busy). Retrying in 3s...")
+                    time.sleep(3)
+                    continue
+                else:
+                    # اگر خطای دیگری بود (مثل کلید اشتباه)، دیگر تلاش نکن
+                    break
+        
+        # اگر هر ۳ بار خطا داد
+        return jsonify({"error": f"سرور گوگل پس از ۳ بار تلاش پاسخ نداد. لطفاً چند دقیقه دیگر امتحان کنید. (خطا: {last_error})"}), 503
         
     except Exception as e:
-        return jsonify({"error": f"خطای سرویس هوش مصنوعی: {str(e)}"}), 500
+        return jsonify({"error": f"خطای سرور: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
