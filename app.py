@@ -13,10 +13,8 @@ import io
 import base64
 
 app = Flask(__name__)
-# 🔥 باز کردن کامل CORS برای اپلیکیشن موبایل
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# اضافه کردن هدرهای امنیتی برای رفع مشکل مرورگر Acode
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -24,20 +22,20 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
 
-# ================= تنظیمات هوش مصنوعی (دوگانه) =================
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+# ================= تنظیمات هوش مصنوعی =================
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 if GEMINI_API_KEY:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '').strip()
 if GROQ_API_KEY:
     groq_client = groq.Groq(api_key=GROQ_API_KEY)
 
-# ================= تنظیمات پیام‌رسان بله =================
+# ================= تنظیمات بله =================
 BALE_BOT_TOKEN = os.environ.get('BALE_BOT_TOKEN', '')
 BALE_CHAT_ID = os.environ.get('BALE_CHAT_ID', '')
 
-# ================= تنظیمات دیتابیس =================
+# ================= دیتابیس =================
 db_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -59,7 +57,7 @@ with app.app_context():
         db.session.add(BotState())
         db.session.commit()
 
-# ================= توابع کمکی =================
+# ================= توابع =================
 def add_log(message):
     state = BotState.query.first()
     timestamp = time.strftime("%H:%M:%S")
@@ -76,16 +74,14 @@ def send_bale_notification(message):
         url = f"https://tapi.bale.ai/bot{BALE_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": BALE_CHAT_ID, "text": message}
         requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Bale Notification Error: {e}")
+    except: pass
 
 def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=20):
     end_time = int(time.time())
     start_time = end_time - (limit * resolution * 60)
     url = f"https://apiv2.nobitex.ir/market/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         if res.json().get('s') == 'ok': return res.json()['c']
     except: pass
     return None
@@ -116,14 +112,14 @@ def bot_logic_loop():
                     if close_prices:
                         rsi = calculate_rsi(close_prices)
                         if not state.in_position and rsi < 30:
-                            msg = f"🚨 سیگنال خرید (BUY)!\nقیمت: ${current_price:,.0f}\nشاخص RSI: {rsi:.2f}"
+                            msg = f"🚨 سیگنال خرید (BUY)!\nقیمت: ${current_price:,.0f}\nRSI: {rsi:.2f}"
                             add_log(f"BUY SIGNAL! RSI: {rsi:.2f}")
                             send_bale_notification(msg)
                             state.in_position = True
                             state.entry_price = current_price
                             db.session.commit()
                         elif state.in_position and rsi > 70:
-                            msg = f"🔻 سیگنال فروش (SELL)!\nقیمت: ${current_price:,.0f}\nشاخص RSI: {rsi:.2f}"
+                            msg = f"🔻 سیگنال فروش (SELL)!\nقیمت: ${current_price:,.0f}\nRSI: {rsi:.2f}"
                             add_log(f"SELL SIGNAL! RSI: {rsi:.2f}")
                             send_bale_notification(msg)
                             state.in_position = False
@@ -135,7 +131,7 @@ def bot_logic_loop():
                     add_log(f"Loop Error: {e}")
         time.sleep(15)
 
-# ================= API Routes =================
+# ================= API =================
 thread_started = False
 @app.before_request
 def start_background_thread():
@@ -147,12 +143,7 @@ def start_background_thread():
 @app.route('/status', methods=['GET'])
 def get_status():
     state = BotState.query.first()
-    return jsonify({
-        "is_active": state.is_active,
-        "in_position": state.in_position,
-        "entry_price": state.entry_price,
-        "logs": state.logs.split('\n')
-    })
+    return jsonify({"is_active": state.is_active, "in_position": state.in_position, "entry_price": state.entry_price, "logs": state.logs.split('\n')})
 
 @app.route('/toggle', methods=['POST'])
 def toggle_bot():
@@ -162,7 +153,6 @@ def toggle_bot():
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
 
-# 🔥 مسیر تحلیل
 @app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze_chart():
     if request.method == 'OPTIONS':
@@ -174,44 +164,51 @@ def analyze_chart():
     try:
         file = request.files['image']
         img = PIL.Image.open(io.BytesIO(file.read()))
-        img.thumbnail((800, 800)) # بهینه‌سازی عکس
+        img.thumbnail((800, 800))
         
         buffered = io.BytesIO()
         img.convert('RGB').save(buffered, format="JPEG")
-        img_bytes = buffered.getvalue()
-        base64_image = base64.b64encode(img_bytes).decode('utf-8')
+        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
         
         prompt = """
-        شما یک تحلیلگر تکنیکال ارشد و حرفه‌ای در بازار ارزهای دیجیتال هستید. 
-        تصویر چارت ارسال شده را با دقت بررسی کنید و یک تحلیل جامع و دقیق به زبان فارسی ارائه دهید. 
-        لطفاً تحلیل خود را دقیقاً در قالب بخش‌های زیر بنویسید و حتماً بین هر بخش از خط جدید (Enter) استفاده کنید:
-        1. روند کلی بازار
-        2. سطوح کلیدی حمایت و مقاومت
-        3. بررسی اندیکاتورها
-        4. الگوهای کندلی
-        5. پیشنهاد معاملاتی دقیق
+        شما یک تحلیلگر تکنیکال حرفه‌ای هستید. تصویر چارت را بررسی کنید و تحلیل جامع به فارسی (با خط جدید برای هر بخش) بدهید:
+        1. روند کلی
+        2. حمایت و مقاومت
+        3. اندیکاتورها
+        4. الگوها
+        5. پیشنهاد معاملاتی (ورود، سود، ضرر)
         """
 
+        gemini_error_msg = "کلید تنظیم نشده"
+        groq_error_msg = "کلید تنظیم نشده"
+
+        # 1. تلاش با Gemini
         if GEMINI_API_KEY:
             try:
-                response = gemini_client.models.generate_content(model='gemini-3.8-flash', contents=[prompt, img])
+                # تغییر مدل به 1.5-flash که پایدارترین مدل بینایی گوگل است
+                response = gemini_client.models.generate_content(model='gemini-1.5-flash', contents=[prompt, img])
                 return jsonify({"analysis": response.text})
             except Exception as e:
-                print(f"Gemini failed: {e}. Switching to Groq...")
+                gemini_error_msg = str(e)
+                print(f"Gemini failed: {gemini_error_msg}")
         
+        # 2. تلاش با Groq (پشتیبان)
         if GROQ_API_KEY:
             try:
+                # تغییر مدل به 90b-vision که در Groq پشتیبانی می‌شود
                 response = groq_client.chat.completions.create(
-                    model="llama-3.2-11b-vision-preview",
+                    model="llama-3.2-90b-vision-preview",
                     messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
                     temperature=0.5, max_tokens=1024
                 )
                 return jsonify({"analysis": response.choices[0].message.content})
             except Exception as e:
-                print(f"Groq failed: {e}")
-                return jsonify({"error": "هر دو سرویس هوش مصنوعی در دسترس نیستند."}), 500
+                groq_error_msg = str(e)
+                print(f"Groq failed: {groq_error_msg}")
 
-        return jsonify({"error": "هیچ کلید API تنظیم نشده است."}), 500
+        # اگر هر دو خطا دادند، متن دقیق خطاها را برمی‌گردانیم
+        return jsonify({"error": f"خطای گوگل: {gemini_error_msg} | خطای Groq: {groq_error_msg}"}), 500
+        
     except Exception as e:
         return jsonify({"error": f"خطای سرور: {str(e)}"}), 500
 
