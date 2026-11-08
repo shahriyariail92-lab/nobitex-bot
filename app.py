@@ -12,6 +12,7 @@ import io
 import base64
 
 app = Flask(__name__)
+# باز کردن کامل CORS برای ارتباط اپلیکیشن موبایل با سرور
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.after_request
@@ -26,11 +27,11 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 if GEMINI_API_KEY:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ================= تنظیمات بله =================
+# ================= تنظیمات پیام‌رسان بله =================
 BALE_BOT_TOKEN = os.environ.get('BALE_BOT_TOKEN', '')
 BALE_CHAT_ID = os.environ.get('BALE_CHAT_ID', '')
 
-# ================= دیتابیس =================
+# ================= تنظیمات دیتابیس =================
 db_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -59,7 +60,7 @@ def add_log(message):
     new_log = f"[{timestamp}] {message}"
     current_logs = state.logs.split('\n') if state.logs else []
     current_logs.insert(0, new_log)
-    state.logs = '\n'.join(current_logs[:10])
+    state.logs = '\n'.join(current_logs[:10]) # نگه داشتن ۱۰ لاگ آخر
     db.session.commit()
     print(new_log)
 
@@ -69,21 +70,24 @@ def send_bale_notification(message):
         url = f"https://tapi.bale.ai/bot{BALE_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": BALE_CHAT_ID, "text": message}
         requests.post(url, json=payload, timeout=10)
-    except: pass
+    except Exception as e:
+        print(f"Bale Notification Error: {e}")
 
-def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=50, trade_type="spot"):
+# دریافت داده‌های کندل (OHLC) از نوبیتکس
+def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=50, trade_type="margin"):
     end_time = int(time.time())
     start_time = end_time - (limit * resolution * 60)
     
-    if trade_type == "margin":
-        url = f"https://apiv2.nobitex.ir/margin/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
-    else:
-        url = f"https://apiv2.nobitex.ir/market/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
+    # طبق مستندات نوبیتکس، برای دریافت کندل‌ها از این آدرس استفاده می‌شود
+    url = f"https://apiv2.nobitex.ir/market/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
     
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    # هدر اختصاصی برای جلوگیری از بلاک شدن
+    headers = {'User-Agent': 'TraderBot/Technicalist-1.0.0'}
+    
     try:
         res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
+        
         if data.get('s') == 'ok':
             return {
                 "open": data['o'],
@@ -92,22 +96,11 @@ def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=50, trade_type="spot"):
                 "close": data['c']
             }
         else:
+            print(f"OHLC API response: {data.get('s')}")
             return None
     except Exception as e:
         print(f"OHLC Error: {e}")
-    return None
-
-def calculate_rsi(prices, period=14):
-    if not prices or len(prices) < period + 1: return None
-    gains, losses = [], []
-    for i in range(1, len(prices)):
-        change = prices[i] - prices[i-1]
-        gains.append(change if change > 0 else 0)
-        losses.append(abs(change) if change < 0 else 0)
-    avg_gain = sum(gains[:period])/period
-    avg_loss = sum(losses[:period])/period
-    if avg_loss == 0: return 100
-    return 100 - (100 / (1 + (avg_gain / avg_loss)))
+        return None
 
 # ================= اندیکاتورهای فیوچرز =================
 def calculate_ema(prices, period):
@@ -128,6 +121,7 @@ def calculate_supertrend(high, low, close, period=10, multiplier=3):
     atr = sum(tr_list[-period:]) / period
     hl2 = (high[-1] + low[-1]) / 2
     lower_band = hl2 - (multiplier * atr)
+    # اگر قیمت بالای باند پایین باشد، روند صعودی (1) است
     return 1 if close[-1] > lower_band else -1
 
 def calculate_macd(prices):
@@ -144,12 +138,12 @@ def bot_logic_loop():
             state = BotState.query.first()
             if state and state.is_active:
                 try:
-                    # لاگ برای اطمینان از اجرای حلقه
                     add_log("Checking Futures Market...")
                     
+                    # دریافت داده‌های بازار (برای فیوچرز هم از همین تابع استفاده می‌کنیم)
                     ohlc = get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=50, trade_type="margin")
                     
-                    if ohlc:
+                    if ohlc and len(ohlc['close']) > 0:
                         close_prices = ohlc['close']
                         high_prices = ohlc['high']
                         low_prices = ohlc['low']
@@ -180,7 +174,7 @@ def bot_logic_loop():
                                 state.entry_price = current_price
                                 db.session.commit()
                             
-                            # بستن پوزیشن
+                            # بستن پوزیشن در صورت تغییر روند
                             elif state.in_position:
                                 if (supertrend == -1 and state.entry_price < current_price) or (supertrend == 1 and state.entry_price > current_price):
                                     add_log("CLOSING POSITION: Trend Reversal")
@@ -193,7 +187,7 @@ def bot_logic_loop():
                         else:
                             add_log("Not enough data to calculate indicators.")
                     else:
-                        add_log("Failed to fetch OHLC data from Nobitex (Margin API).")
+                        add_log("Failed to fetch OHLC data from Nobitex.")
                 except Exception as e:
                     add_log(f"Loop Error: {e}")
         time.sleep(15)
@@ -220,6 +214,7 @@ def toggle_bot():
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
 
+# 🔥 مسیر تحلیل عکس با هوش مصنوعی
 @app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze_chart():
     if request.method == 'OPTIONS':
@@ -231,7 +226,7 @@ def analyze_chart():
     try:
         file = request.files['image']
         img = PIL.Image.open(io.BytesIO(file.read()))
-        img.thumbnail((800, 800))
+        img.thumbnail((800, 800)) # کوچک کردن عکس برای سرعت بیشتر
         
         prompt = """
         شما یک تحلیلگر تکنیکال حرفه‌ای هستید. تصویر چارت را بررسی کنید و تحلیل جامع به فارسی (با خط جدید برای هر بخش) بدهید:
@@ -248,6 +243,7 @@ def analyze_chart():
         max_retries = 3
         last_error = ""
         
+        # سیستم تلاش مجدد خودکار در صورت شلوغی گوگل
         for attempt in range(max_retries):
             try:
                 response = gemini_client.models.generate_content(
@@ -258,7 +254,7 @@ def analyze_chart():
             except Exception as e:
                 last_error = str(e)
                 if "503" in last_error or "UNAVAILABLE" in last_error:
-                    time.sleep(3)
+                    time.sleep(3) # صبر ۳ ثانیه و تلاش مجدد
                     continue
                 else:
                     break
