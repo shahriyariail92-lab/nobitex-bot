@@ -16,12 +16,10 @@ app = Flask(__name__)
 CORS(app)
 
 # ================= تنظیمات هوش مصنوعی (دوگانه) =================
-# سرویس اول: Gemini
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 if GEMINI_API_KEY:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# سرویس دوم (پشتیبان): Groq
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 if GROQ_API_KEY:
     groq_client = groq.Groq(api_key=GROQ_API_KEY)
@@ -64,8 +62,7 @@ def add_log(message):
     print(new_log)
 
 def send_bale_notification(message):
-    if not BALE_BOT_TOKEN or not BALE_CHAT_ID:
-        return
+    if not BALE_BOT_TOKEN or not BALE_CHAT_ID: return
     try:
         url = f"https://tapi.bale.ai/bot{BALE_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": BALE_CHAT_ID, "text": message}
@@ -109,7 +106,6 @@ def bot_logic_loop():
                     close_prices = get_ohlc_data()
                     if close_prices:
                         rsi = calculate_rsi(close_prices)
-                        
                         if not state.in_position and rsi < 30:
                             msg = f"🚨 سیگنال خرید (BUY)!\nقیمت: ${current_price:,.0f}\nشاخص RSI: {rsi:.2f}"
                             add_log(f"BUY SIGNAL! RSI: {rsi:.2f}")
@@ -117,7 +113,6 @@ def bot_logic_loop():
                             state.in_position = True
                             state.entry_price = current_price
                             db.session.commit()
-                            
                         elif state.in_position and rsi > 70:
                             msg = f"🔻 سیگنال فروش (SELL)!\nقیمت: ${current_price:,.0f}\nشاخص RSI: {rsi:.2f}"
                             add_log(f"SELL SIGNAL! RSI: {rsi:.2f}")
@@ -158,16 +153,24 @@ def toggle_bot():
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
 
-# 🔥 مسیر تحلیل با سیستم پشتیبان (Fallback)
+# 🔥 مسیر تحلیل با سیستم پشتیبان و بهینه‌سازی تصویر
 @app.route('/analyze', methods=['POST'])
 def analyze_chart():
     if 'image' not in request.files:
-        return jsonify({"error": "No image uploaded"}), 400
+        return jsonify({"error": "عکسی ارسال نشده است."}), 400
 
     try:
         file = request.files['image']
-        img_bytes = file.read()
-        img = PIL.Image.open(io.BytesIO(img_bytes))
+        img = PIL.Image.open(io.BytesIO(file.read()))
+        
+        # کوچک کردن عکس برای افزایش سرعت (حداکثر 800 پیکسل)
+        img.thumbnail((800, 800))
+        
+        # تبدیل عکس کوچک شده به بایت و Base64
+        buffered = io.BytesIO()
+        img.convert('RGB').save(buffered, format="JPEG")
+        img_bytes = buffered.getvalue()
+        base64_image = base64.b64encode(img_bytes).decode('utf-8')
         
         prompt = """
         شما یک تحلیلگر تکنیکال ارشد و حرفه‌ای در بازار ارزهای دیجیتال هستید. 
@@ -180,11 +183,9 @@ def analyze_chart():
         3. بررسی اندیکاتورها (مانند RSI و حجم معاملات)
         4. الگوهای کندلی قابل مشاهده
         5. پیشنهاد معاملاتی دقیق (نقطه ورود، حد سود، حد ضرر)
-        
-        لحن شما باید کاملاً حرفه‌ای، قاطع و راهگشا باشد.
         """
 
-        # 1. تلاش با سرویس اصلی (Gemini)
+        # 1. تلاش با Gemini
         if GEMINI_API_KEY:
             try:
                 response = gemini_client.models.generate_content(
@@ -194,14 +195,10 @@ def analyze_chart():
                 return jsonify({"analysis": response.text})
             except Exception as e:
                 print(f"Gemini failed: {e}. Switching to Groq...")
-                # اگر گوگل خطا داد، به خط بعدی می‌رود (Groq)
         
-        # 2. تلاش با سرویس پشتیبان (Groq)
+        # 2. تلاش با Groq (پشتیبان)
         if GROQ_API_KEY:
             try:
-                # تبدیل عکس به فرمت Base64 برای Groq
-                base64_image = base64.b64encode(img_bytes).decode('utf-8')
-                
                 response = groq_client.chat.completions.create(
                     model="llama-3.2-11b-vision-preview",
                     messages=[
@@ -224,7 +221,7 @@ def analyze_chart():
         return jsonify({"error": "هیچ کلید API تنظیم نشده است."}), 500
         
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"خطای سرور: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
