@@ -52,7 +52,7 @@ with app.app_context():
         db.session.add(BotState())
         db.session.commit()
 
-# ================= توابع =================
+# ================= توابع کمکی =================
 def add_log(message):
     state = BotState.query.first()
     timestamp = time.strftime("%H:%M:%S")
@@ -71,14 +71,29 @@ def send_bale_notification(message):
         requests.post(url, json=payload, timeout=10)
     except: pass
 
-def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=20):
+# دریافت داده‌های بازار (اسپات و فیوچرز)
+def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=50, trade_type="spot"):
     end_time = int(time.time())
     start_time = end_time - (limit * resolution * 60)
-    url = f"https://apiv2.nobitex.ir/market/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
+    
+    if trade_type == "margin":
+        url = f"https://apiv2.nobitex.ir/margin/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
+    else:
+        url = f"https://apiv2.nobitex.ir/market/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
+    
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        if res.json().get('s') == 'ok': return res.json()['c']
-    except: pass
+        res = requests.get(url, headers=headers, timeout=10)
+        data = res.json()
+        if data.get('s') == 'ok':
+            return {
+                "open": data['o'],
+                "high": data['h'],
+                "low": data['l'],
+                "close": data['c']
+            }
+    except Exception as e:
+        print(f"OHLC Error: {e}")
     return None
 
 def calculate_rsi(prices, period=14):
@@ -93,40 +108,90 @@ def calculate_rsi(prices, period=14):
     if avg_loss == 0: return 100
     return 100 - (100 / (1 + (avg_gain / avg_loss)))
 
+# ================= اندیکاتورهای فیوچرز =================
+def calculate_ema(prices, period):
+    if len(prices) < period: return None
+    multiplier = 2 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for price in prices[period:]:
+        ema = (price - ema) * multiplier + ema
+    return ema
+
+def calculate_supertrend(high, low, close, period=10, multiplier=3):
+    if len(close) < period: return None
+    tr_list = []
+    for i in range(1, len(close)):
+        tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr_list.append(tr)
+    if len(tr_list) < period: return None
+    atr = sum(tr_list[-period:]) / period
+    hl2 = (high[-1] + low[-1]) / 2
+    lower_band = hl2 - (multiplier * atr)
+    return 1 if close[-1] > lower_band else -1
+
+def calculate_macd(prices):
+    if len(prices) < 26: return None
+    ema_fast = calculate_ema(prices, 12)
+    ema_slow = calculate_ema(prices, 26)
+    if ema_fast is None or ema_slow is None: return None
+    return ema_fast - ema_slow
+
+# ================= حلقه اصلی ربات =================
 def bot_logic_loop():
     while True:
         with app.app_context():
             state = BotState.query.first()
             if state and state.is_active:
                 try:
-                    url = "https://apiv2.nobitex.ir/market/stats?srcCurrency=btc&dstCurrency=usdt"
-                    res_price = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10).json()
-                    current_price = float(res_price['stats']['btc-usdt']['latest'])
-
-                    close_prices = get_ohlc_data()
-                    if close_prices:
-                        rsi = calculate_rsi(close_prices)
-                        if not state.in_position and rsi < 30:
-                            msg = f"🚨 سیگنال خرید (BUY)!\nقیمت: ${current_price:,.0f}\nRSI: {rsi:.2f}"
-                            add_log(f"BUY SIGNAL! RSI: {rsi:.2f}")
-                            send_bale_notification(msg)
-                            state.in_position = True
-                            state.entry_price = current_price
-                            db.session.commit()
-                        elif state.in_position and rsi > 70:
-                            msg = f"🔻 سیگنال فروش (SELL)!\nقیمت: ${current_price:,.0f}\nRSI: {rsi:.2f}"
-                            add_log(f"SELL SIGNAL! RSI: {rsi:.2f}")
-                            send_bale_notification(msg)
-                            state.in_position = False
-                            state.entry_price = 0.0
-                            db.session.commit()
-                        else:
-                            add_log(f"Analyzing... Price: ${current_price:,.0f}, RSI: {rsi:.2f}")
+                    # دریافت داده‌های فیوچرز
+                    ohlc = get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=50, trade_type="margin")
+                    
+                    if ohlc:
+                        close_prices = ohlc['close']
+                        high_prices = ohlc['high']
+                        low_prices = ohlc['low']
+                        current_price = close_prices[-1]
+                        
+                        ema9 = calculate_ema(close_prices, 9)
+                        ema21 = calculate_ema(close_prices, 21)
+                        supertrend = calculate_supertrend(high_prices, low_prices, close_prices)
+                        macd = calculate_macd(close_prices)
+                        
+                        if ema9 and ema21 and supertrend and macd is not None:
+                            
+                            # 🟢 سیگنال خرید (Long)
+                            if not state.in_position and ema9 > ema21 and supertrend == 1 and macd > 0:
+                                msg = f"🚀 سیگنال خرید فیوچرز (LONG)!\nقیمت: ${current_price:,.0f}"
+                                add_log("LONG SIGNAL (Futures): Confirmed")
+                                send_bale_notification(msg)
+                                state.in_position = True
+                                state.entry_price = current_price
+                                db.session.commit()
+                            
+                            # 🔴 سیگنال فروش (Short)
+                            elif not state.in_position and ema9 < ema21 and supertrend == -1 and macd < 0:
+                                msg = f"🔻 سیگنال فروش فیوچرز (SHORT)!\nقیمت: ${current_price:,.0f}"
+                                add_log("SHORT SIGNAL (Futures): Confirmed")
+                                send_bale_notification(msg)
+                                state.in_position = True
+                                state.entry_price = current_price
+                                db.session.commit()
+                            
+                            # بستن پوزیشن
+                            elif state.in_position:
+                                if (supertrend == -1 and state.entry_price < current_price) or (supertrend == 1 and state.entry_price > current_price):
+                                    add_log("CLOSING POSITION: Trend Reversal")
+                                    state.in_position = False
+                                    state.entry_price = 0.0
+                                    db.session.commit()
+                            
+                            else:
+                                add_log(f"Analyzing Futures... Price: ${current_price:,.0f} | EMA9: {ema9:,.0f} | EMA21: {ema21:,.0f}")
                 except Exception as e:
                     add_log(f"Loop Error: {e}")
         time.sleep(15)
 
-# ================= API =================
+# ================= API Routes =================
 thread_started = False
 @app.before_request
 def start_background_thread():
@@ -173,7 +238,6 @@ def analyze_chart():
         if not GEMINI_API_KEY:
             return jsonify({"error": "کلید API گوگل تنظیم نشده است."}), 500
 
-        # 🔥 سیستم تلاش مجدد خودکار (تا ۳ بار)
         max_retries = 3
         last_error = ""
         
@@ -186,17 +250,13 @@ def analyze_chart():
                 return jsonify({"analysis": response.text})
             except Exception as e:
                 last_error = str(e)
-                # اگر خطای 503 (شلوغی) بود، ۳ ثانیه صبر کن و دوباره تلاش کن
                 if "503" in last_error or "UNAVAILABLE" in last_error:
-                    print(f"Attempt {attempt+1} failed (Google Busy). Retrying in 3s...")
                     time.sleep(3)
                     continue
                 else:
-                    # اگر خطای دیگری بود (مثل کلید اشتباه)، دیگر تلاش نکن
                     break
         
-        # اگر هر ۳ بار خطا داد
-        return jsonify({"error": f"سرور گوگل پس از ۳ بار تلاش پاسخ نداد. لطفاً چند دقیقه دیگر امتحان کنید. (خطا: {last_error})"}), 503
+        return jsonify({"error": f"سرور گوگل پس از ۳ بار تلاش پاسخ نداد. لطفاً بعداً امتحان کنید."}), 503
         
     except Exception as e:
         return jsonify({"error": f"خطای سرور: {str(e)}"}), 500
