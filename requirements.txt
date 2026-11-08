@@ -6,4 +6,3 @@ requests
 gunicorn
 google-genai
 Pillow
-groq
