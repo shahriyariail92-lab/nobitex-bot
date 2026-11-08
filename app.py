@@ -5,7 +5,8 @@ import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import PIL.Image
 import io
 
@@ -15,7 +16,7 @@ CORS(app)
 # ================= تنظیمات هوش مصنوعی =================
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ================= تنظیمات دیتابیس =================
 db_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
@@ -129,7 +130,7 @@ def toggle_bot():
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
 
-# 🔥 مسیر جدید: تحلیل عکس چارت با هوش مصنوعی
+# 🔥 مسیر تحلیل عکس با مدل جدید Gemini 3.8 Flash
 @app.route('/analyze', methods=['POST'])
 def analyze_chart():
     if not GEMINI_API_KEY:
@@ -142,20 +143,25 @@ def analyze_chart():
         file = request.files['image']
         img = PIL.Image.open(io.BytesIO(file.read()))
         
-        # استفاده از مدل Gemini 1.5 Flash
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
         prompt = """
-        شما یک تحلیلگر تکنیکال حرفه‌ای ارز دیجیتال هستید. 
-        تصویر چارت ارسال شده را به دقت بررسی کنید.
-        در یک پاراگراف کوتاه و به زبان فارسی تحلیل کنید:
-        1. روند فعلی (صعودی، نزولی، رنج)
-        2. سطوح حمایت و مقاومت کلیدی
-        3. یک پیشنهاد معاملاتی (خرید/فروش، حد سود، حد ضرر).
-        پاسخ شما باید حداکثر ۱۰۰ کلمه باشد.
+        شما یک تحلیلگر تکنیکال ارشد و حرفه‌ای در بازار ارزهای دیجیتال هستید. 
+        تصویر چارت ارسال شده را با دقت بررسی کنید و یک تحلیل جامع و دقیق به زبان فارسی ارائه دهید. 
+        
+        لطفاً تحلیل خود را دقیقاً در قالب بخش‌های زیر بنویسید و حتماً بین هر بخش از خط جدید (Enter) استفاده کنید:
+        
+        1. روند کلی بازار (صعودی/نزولی/رنج)
+        2. سطوح کلیدی حمایت و مقاومت
+        3. بررسی اندیکاتورها (مانند RSI و حجم معاملات)
+        4. الگوهای کندلی قابل مشاهده
+        5. پیشنهاد معاملاتی دقیق (نقطه ورود، حد سود، حد ضرر)
+        
+        لحن شما باید کاملاً حرفه‌ای، قاطع و راهگشا باشد.
         """
         
-        response = model.generate_content([prompt, img])
+        response = client.models.generate_content(
+            model='gemini-3.8-flash',
+            contents=[prompt, img]
+        )
         return jsonify({"analysis": response.text})
         
     except Exception as e:
