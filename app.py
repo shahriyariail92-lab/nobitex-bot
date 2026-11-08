@@ -18,6 +18,10 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
+# ================= تنظیمات پیام‌رسان بله =================
+BALE_BOT_TOKEN = os.environ.get('BALE_BOT_TOKEN', '')
+BALE_CHAT_ID = os.environ.get('BALE_CHAT_ID', '')
+
 # ================= تنظیمات دیتابیس =================
 db_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
 if db_url.startswith("postgres://"):
@@ -50,6 +54,18 @@ def add_log(message):
     state.logs = '\n'.join(current_logs[:10])
     db.session.commit()
     print(new_log)
+
+# تابع ارسال پیام به بله
+def send_bale_notification(message):
+    if not BALE_BOT_TOKEN or not BALE_CHAT_ID:
+        print("Bale Token or Chat ID is missing.")
+        return
+    try:
+        url = f"https://tapi.bale.ai/bot{BALE_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": BALE_CHAT_ID, "text": message}
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Bale Notification Error: {e}")
 
 def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=20):
     end_time = int(time.time())
@@ -87,13 +103,21 @@ def bot_logic_loop():
                     close_prices = get_ohlc_data()
                     if close_prices:
                         rsi = calculate_rsi(close_prices)
+                        
+                        # سیگنال خرید
                         if not state.in_position and rsi < 30:
-                            add_log(f"🚨 BUY SIGNAL! RSI: {rsi:.2f}. (Paper Trading)")
+                            msg = f"🚨 سیگنال خرید (BUY)!\nقیمت: ${current_price:,.0f}\nشاخص RSI: {rsi:.2f}"
+                            add_log(f"BUY SIGNAL! RSI: {rsi:.2f}")
+                            send_bale_notification(msg)  # ارسال به بله
                             state.in_position = True
                             state.entry_price = current_price
                             db.session.commit()
+                            
+                        # سیگنال فروش
                         elif state.in_position and rsi > 70:
-                            add_log(f"🔻 SELL SIGNAL! RSI: {rsi:.2f}. (Paper Trading)")
+                            msg = f"🔻 سیگنال فروش (SELL)!\nقیمت: ${current_price:,.0f}\nشاخص RSI: {rsi:.2f}"
+                            add_log(f"SELL SIGNAL! RSI: {rsi:.2f}")
+                            send_bale_notification(msg)  # ارسال به بله
                             state.in_position = False
                             state.entry_price = 0.0
                             db.session.commit()
@@ -130,9 +154,9 @@ def toggle_bot():
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
 
-# 🔥 مسیر تحلیل عکس با مدل جدید Gemini 3.8 Flash
 @app.route('/analyze', methods=['POST'])
 def analyze_chart():
+    # این بخش همان کدهای قبلی هوش مصنوعی است (بدون تغییر)
     if not GEMINI_API_KEY:
         return jsonify({"error": "API Key is missing in Render settings."}), 500
     
