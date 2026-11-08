@@ -13,7 +13,16 @@ import io
 import base64
 
 app = Flask(__name__)
-CORS(app)
+# 🔥 باز کردن کامل CORS برای اپلیکیشن موبایل
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# اضافه کردن هدرهای امنیتی برای رفع مشکل مرورگر Acode
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # ================= تنظیمات هوش مصنوعی (دوگانه) =================
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
@@ -153,20 +162,20 @@ def toggle_bot():
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
 
-# 🔥 مسیر تحلیل با سیستم پشتیبان و بهینه‌سازی تصویر
-@app.route('/analyze', methods=['POST'])
+# 🔥 مسیر تحلیل
+@app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze_chart():
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+
     if 'image' not in request.files:
         return jsonify({"error": "عکسی ارسال نشده است."}), 400
 
     try:
         file = request.files['image']
         img = PIL.Image.open(io.BytesIO(file.read()))
+        img.thumbnail((800, 800)) # بهینه‌سازی عکس
         
-        # کوچک کردن عکس برای افزایش سرعت (حداکثر 800 پیکسل)
-        img.thumbnail((800, 800))
-        
-        # تبدیل عکس کوچک شده به بایت و Base64
         buffered = io.BytesIO()
         img.convert('RGB').save(buffered, format="JPEG")
         img_bytes = buffered.getvalue()
@@ -175,51 +184,34 @@ def analyze_chart():
         prompt = """
         شما یک تحلیلگر تکنیکال ارشد و حرفه‌ای در بازار ارزهای دیجیتال هستید. 
         تصویر چارت ارسال شده را با دقت بررسی کنید و یک تحلیل جامع و دقیق به زبان فارسی ارائه دهید. 
-        
         لطفاً تحلیل خود را دقیقاً در قالب بخش‌های زیر بنویسید و حتماً بین هر بخش از خط جدید (Enter) استفاده کنید:
-        
-        1. روند کلی بازار (صعودی/نزولی/رنج)
+        1. روند کلی بازار
         2. سطوح کلیدی حمایت و مقاومت
-        3. بررسی اندیکاتورها (مانند RSI و حجم معاملات)
-        4. الگوهای کندلی قابل مشاهده
-        5. پیشنهاد معاملاتی دقیق (نقطه ورود، حد سود، حد ضرر)
+        3. بررسی اندیکاتورها
+        4. الگوهای کندلی
+        5. پیشنهاد معاملاتی دقیق
         """
 
-        # 1. تلاش با Gemini
         if GEMINI_API_KEY:
             try:
-                response = gemini_client.models.generate_content(
-                    model='gemini-3.8-flash',
-                    contents=[prompt, img]
-                )
+                response = gemini_client.models.generate_content(model='gemini-3.8-flash', contents=[prompt, img])
                 return jsonify({"analysis": response.text})
             except Exception as e:
                 print(f"Gemini failed: {e}. Switching to Groq...")
         
-        # 2. تلاش با Groq (پشتیبان)
         if GROQ_API_KEY:
             try:
                 response = groq_client.chat.completions.create(
                     model="llama-3.2-11b-vision-preview",
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                            ]
-                        }
-                    ],
-                    temperature=0.5,
-                    max_tokens=1024
+                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
+                    temperature=0.5, max_tokens=1024
                 )
                 return jsonify({"analysis": response.choices[0].message.content})
             except Exception as e:
                 print(f"Groq failed: {e}")
-                return jsonify({"error": "هر دو سرویس هوش مصنوعی در دسترس نیستند. لطفاً بعداً تلاش کنید."}), 500
+                return jsonify({"error": "هر دو سرویس هوش مصنوعی در دسترس نیستند."}), 500
 
         return jsonify({"error": "هیچ کلید API تنظیم نشده است."}), 500
-        
     except Exception as e:
         return jsonify({"error": f"خطای سرور: {str(e)}"}), 500
 
