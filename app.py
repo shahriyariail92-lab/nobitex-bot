@@ -7,7 +7,6 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from google import genai
 from google.genai import types
-import groq
 import PIL.Image
 import io
 import base64
@@ -26,10 +25,6 @@ def after_request(response):
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 if GEMINI_API_KEY:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-
-GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '').strip()
-if GROQ_API_KEY:
-    groq_client = groq.Groq(api_key=GROQ_API_KEY)
 
 # ================= تنظیمات بله =================
 BALE_BOT_TOKEN = os.environ.get('BALE_BOT_TOKEN', '')
@@ -166,10 +161,6 @@ def analyze_chart():
         img = PIL.Image.open(io.BytesIO(file.read()))
         img.thumbnail((800, 800))
         
-        buffered = io.BytesIO()
-        img.convert('RGB').save(buffered, format="JPEG")
-        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
-        
         prompt = """
         شما یک تحلیلگر تکنیکال حرفه‌ای هستید. تصویر چارت را بررسی کنید و تحلیل جامع به فارسی (با خط جدید برای هر بخش) بدهید:
         1. روند کلی
@@ -179,38 +170,18 @@ def analyze_chart():
         5. پیشنهاد معاملاتی (ورود، سود، ضرر)
         """
 
-        gemini_error_msg = "کلید تنظیم نشده"
-        groq_error_msg = "کلید تنظیم نشده"
+        if not GEMINI_API_KEY:
+            return jsonify({"error": "کلید API گوگل تنظیم نشده است."}), 500
 
-        # 1. تلاش با Gemini
-        if GEMINI_API_KEY:
-            try:
-                # تغییر مدل به 1.5-flash که پایدارترین مدل بینایی گوگل است
-                response = gemini_client.models.generate_content(model='gemini-1.5-flash', contents=[prompt, img])
-                return jsonify({"analysis": response.text})
-            except Exception as e:
-                gemini_error_msg = str(e)
-                print(f"Gemini failed: {gemini_error_msg}")
-        
-        # 2. تلاش با Groq (پشتیبان)
-        if GROQ_API_KEY:
-            try:
-                # تغییر مدل به 90b-vision که در Groq پشتیبانی می‌شود
-                response = groq_client.chat.completions.create(
-                    model="llama-3.2-90b-vision-preview",
-                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
-                    temperature=0.5, max_tokens=1024
-                )
-                return jsonify({"analysis": response.choices[0].message.content})
-            except Exception as e:
-                groq_error_msg = str(e)
-                print(f"Groq failed: {groq_error_msg}")
-
-        # اگر هر دو خطا دادند، متن دقیق خطاها را برمی‌گردانیم
-        return jsonify({"error": f"خطای گوگل: {gemini_error_msg} | خطای Groq: {groq_error_msg}"}), 500
+        # استفاده از مدل جدید و معتبر Gemini 3.8 Flash
+        response = gemini_client.models.generate_content(
+            model='gemini-3.8-flash', 
+            contents=[prompt, img]
+        )
+        return jsonify({"analysis": response.text})
         
     except Exception as e:
-        return jsonify({"error": f"خطای سرور: {str(e)}"}), 500
+        return jsonify({"error": f"خطای سرویس هوش مصنوعی: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
