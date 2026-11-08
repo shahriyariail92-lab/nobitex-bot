@@ -71,7 +71,6 @@ def send_bale_notification(message):
         requests.post(url, json=payload, timeout=10)
     except: pass
 
-# دریافت داده‌های بازار (اسپات و فیوچرز)
 def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=50, trade_type="spot"):
     end_time = int(time.time())
     start_time = end_time - (limit * resolution * 60)
@@ -92,6 +91,8 @@ def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=50, trade_type="spot"):
                 "low": data['l'],
                 "close": data['c']
             }
+        else:
+            return None
     except Exception as e:
         print(f"OHLC Error: {e}")
     return None
@@ -143,7 +144,9 @@ def bot_logic_loop():
             state = BotState.query.first()
             if state and state.is_active:
                 try:
-                    # دریافت داده‌های فیوچرز
+                    # لاگ برای اطمینان از اجرای حلقه
+                    add_log("Checking Futures Market...")
+                    
                     ohlc = get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=50, trade_type="margin")
                     
                     if ohlc:
@@ -186,7 +189,11 @@ def bot_logic_loop():
                                     db.session.commit()
                             
                             else:
-                                add_log(f"Analyzing Futures... Price: ${current_price:,.0f} | EMA9: {ema9:,.0f} | EMA21: {ema21:,.0f}")
+                                add_log(f"Analyzing... Price: ${current_price:,.0f} | EMA9: {ema9:,.0f} | EMA21: {ema21:,.0f}")
+                        else:
+                            add_log("Not enough data to calculate indicators.")
+                    else:
+                        add_log("Failed to fetch OHLC data from Nobitex (Margin API).")
                 except Exception as e:
                     add_log(f"Loop Error: {e}")
         time.sleep(15)
