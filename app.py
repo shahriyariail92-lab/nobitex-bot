@@ -140,7 +140,6 @@ def bot_logic_loop():
                         macd = calculate_macd(close_prices)
                         
                         if ema9 and ema21 and supertrend and macd is not None:
-                            # 🟢 سیگنال خرید (Long)
                             if not state.in_position and ema9 > ema21 and supertrend == 1 and macd > 0:
                                 msg = f"🚀 سیگنال خرید فیوچرز (LONG)!\nقیمت: ${current_price:,.0f}"
                                 add_log("LONG SIGNAL (Futures): Confirmed")
@@ -148,8 +147,6 @@ def bot_logic_loop():
                                 state.in_position = True
                                 state.entry_price = current_price
                                 db.session.commit()
-                            
-                            # 🔴 سیگنال فروش (Short)
                             elif not state.in_position and ema9 < ema21 and supertrend == -1 and macd < 0:
                                 msg = f"🔻 سیگنال فروش فیوچرز (SHORT)!\nقیمت: ${current_price:,.0f}"
                                 add_log("SHORT SIGNAL (Futures): Confirmed")
@@ -157,15 +154,12 @@ def bot_logic_loop():
                                 state.in_position = True
                                 state.entry_price = current_price
                                 db.session.commit()
-                            
-                            # بستن پوزیشن
                             elif state.in_position:
                                 if (supertrend == -1 and state.entry_price < current_price) or (supertrend == 1 and state.entry_price > current_price):
                                     add_log("CLOSING POSITION: Trend Reversal")
                                     state.in_position = False
                                     state.entry_price = 0.0
                                     db.session.commit()
-                            
                             else:
                                 add_log(f"Analyzing... Price: ${current_price:,.0f} | EMA9: {ema9:,.0f} | EMA21: {ema21:,.0f}")
                         else:
@@ -198,7 +192,7 @@ def toggle_bot():
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
 
-# 🔥 مسیر تحلیل با هوش مصنوعی دوگانه (Gemini + Groq)
+# 🔥 مسیر تحلیل با هوش مصنوعی دوگانه
 @app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze_chart():
     if request.method == 'OPTIONS':
@@ -237,13 +231,14 @@ def analyze_chart():
                 gemini_error_msg = str(e)
                 print(f"Gemini failed: {gemini_error_msg}")
         
-        # 2. تلاش با Groq (مدل جدید Qwen)
+        # 2. تلاش با Groq (کاهش max_tokens به 900 برای عبور از محدودیت)
         if GROQ_API_KEY:
             try:
                 response = groq_client.chat.completions.create(
-                    model="qwen/qwen3.8-27b", # مدل جدید و پشتیبانی‌شده برای تصویر
+                    model="qwen/qwen3.8-27b",
                     messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
-                    temperature=0.5, max_tokens=1024
+                    temperature=0.5, 
+                    max_tokens=900  # <---- این عدد تغییر کرد
                 )
                 return jsonify({"analysis": response.choices[0].message.content})
             except Exception as e:
