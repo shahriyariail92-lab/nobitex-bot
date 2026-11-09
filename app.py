@@ -11,7 +11,6 @@ import groq
 import PIL.Image
 import io
 import base64
-import math
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -24,14 +23,12 @@ def after_request(response):
     return response
 
 # ================= تنظیمات اصلی =================
-TEST_MODE = True  # ⚠️ برای معامله واقعی باید False شود
-RISK_PER_TRADE_PERCENT = 0.02  # ریسک ۲ درصدی برای هر معامله
-MAX_SPREAD_PERCENT = 0.5  # حداکثر مجاز اسپرد (نیم درصد)
-DAILY_DRAWDOWN_LIMIT = 5.0 # حداکثر ضرر روزانه (۵ درصد)
+TEST_MODE = True 
+RISK_PER_TRADE_PERCENT = 0.02
+MAX_SPREAD_PERCENT = 0.5 
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 if GEMINI_API_KEY: gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '').strip()
 if GROQ_API_KEY: groq_client = groq.Groq(api_key=GROQ_API_KEY)
 
@@ -54,7 +51,9 @@ class BotState(db.Model):
     entry_price = db.Column(db.Float, default=0.0)
     stop_loss = db.Column(db.Float, default=0.0)
     take_profit = db.Column(db.Float, default=0.0)
-    position_size = db.Column(db.Float, default=0.0) # حجم معامله
+    position_size = db.Column(db.Float, default=0.0)
+    # 🆕 اضافه شدن فیلد ارز فعال
+    active_symbol = db.Column(db.String(20), default="BTCUSDT") 
     logs = db.Column(db.Text, default="[System] Database initialized.")
 
 with app.app_context():
@@ -62,6 +61,12 @@ with app.app_context():
     if not BotState.query.first():
         db.session.add(BotState())
         db.session.commit()
+    else:
+        # اگر دیتابیس قبلی فیلد جدید را نداشت، این خطا را نادیده می‌گیریم
+        try:
+            BotState.query.first().active_symbol
+        except:
+            pass
 
 # ================= توابع کمکی =================
 def add_log(message):
@@ -81,10 +86,8 @@ def send_bale_notification(message):
         requests.post(url, json={"chat_id": BALE_CHAT_ID, "text": message}, timeout=10)
     except: pass
 
-# دریافت موجودی حساب و همگام‌سازی
 def get_account_balance():
-    if TEST_MODE or not NOBITEX_API_TOKEN: return 1000.0 # فرض ۱۰۰۰ دلار در حالت تست
-    
+    if TEST_MODE or not NOBITEX_API_TOKEN: return 1000.0
     url = "https://apiv2.nobitex.ir/users/wallets/list"
     headers = {"Authorization": f"Token {NOBITEX_API_TOKEN}"}
     try:
@@ -96,59 +99,56 @@ def get_account_balance():
     except: pass
     return 0.0
 
-# محاسبه حجم با مدیریت ریسک
 def calculate_position_size(balance, entry_price, stop_loss_price):
     risk_amount = balance * RISK_PER_TRADE_PERCENT
     price_difference = abs(entry_price - stop_loss_price)
     if price_difference == 0: return 0
-    # حجم = (مبلغ ریسک) / (فاصله تا حد ضرر)
     size = risk_amount / price_difference
-    # گرد کردن به ۶ رقم اعشار برای بیت کوین
     return round(size, 6)
 
-# بررسی اسپرد (اختلاف خرید و فروش)
-def check_spread(symbol="BTCUSDT"):
-    if TEST_MODE: return True # در حالت تست همیشه تایید است
-    
+def check_spread(symbol):
+    if TEST_MODE: return True
     try:
-        url = "https://apiv2.nobitex.ir/orderbook/BTCUSDT"
+        url = f"https://apiv2.nobitex.ir/orderbook/{symbol}"
         res = requests.get(url, timeout=10).json()
         if res.get('status') == 'ok':
             best_buy = float(res['bids'][0][0])
             best_sell = float(res['asks'][0][0])
             spread_percent = ((best_sell - best_buy) / best_buy) * 100
             if spread_percent > MAX_SPREAD_PERCENT:
-                add_log(f"⚠️ اسپرد بازار بالا است ({spread_percent:.2f}%). معامله لغو شد.")
+                add_log(f"⚠️ اسپرد {symbol} بالا است ({spread_percent:.2f}%). معامله لغو شد.")
                 return False
             return True
     except: pass
     return True
 
-# اجرای سفارش با کارمزد در نظر گرفته شده
 def execute_nobitex_order(order_type, amount, price=0):
+    state = BotState.query.first()
+    # استخراج ارز پایه (مثلاً از BTCUSDT کلمه BTC را جدا میکند)
+    base_currency = state.active_symbol.replace("USDT", "").lower()
+
     if TEST_MODE:
-        add_log(f"🧪 [TEST] {order_type.upper()} {amount} BTC placed.")
+        add_log(f"🧪 [TEST] {order_type.upper()} {amount} {base_currency.upper()} placed.")
         return True
     
     if not NOBITEX_API_TOKEN:
         add_log("❌ توکن API نوبیتکس تنظیم نشده است.")
         return False
 
-    # استفاده از سفارش Limit برای جلوگیری از اسلیپیج شدید
     url = "https://apiv2.nobitex.ir/orders/add"
     headers = {"Authorization": f"Token {NOBITEX_API_TOKEN}"}
     data = {
         "type": order_type,
-        "srcCurrency": "btc",
+        "srcCurrency": base_currency, # ارز داینامیک شد
         "dstCurrency": "usdt",
         "amount": str(amount),
         "price": str(int(price)), 
-        "execution": "limit" # استفاده از Limit به جای Market
+        "execution": "limit"
     }
     try:
         res = requests.post(url, headers=headers, data=data, timeout=10)
         if res.json().get('status') == 'ok':
-            add_log(f"✅ سفارش واقعی {order_type} ثبت شد.")
+            add_log(f"✅ سفارش واقعی {order_type} {base_currency.upper()} ثبت شد.")
             return True
         else:
             add_log(f"❌ خطای نوبیتکس: {res.text}")
@@ -157,7 +157,7 @@ def execute_nobitex_order(order_type, amount, price=0):
         add_log(f"❌ خطای ارتباط: {e}")
         return False
 
-def get_ohlc_data(symbol="BTCUSDT", resolution=60, limit=50):
+def get_ohlc_data(symbol, resolution=60, limit=50):
     end_time = int(time.time())
     start_time = end_time - (limit * resolution * 60)
     url = f"https://apiv2.nobitex.ir/market/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
@@ -203,7 +203,9 @@ def bot_logic_loop():
             state = BotState.query.first()
             if state and state.is_active:
                 try:
-                    ohlc = get_ohlc_data()
+                    current_symbol = state.active_symbol
+                    ohlc = get_ohlc_data(symbol=current_symbol)
+                    
                     if ohlc and len(ohlc['close']) > 0:
                         close_prices = ohlc['close']
                         current_price = close_prices[-1]
@@ -214,14 +216,12 @@ def bot_logic_loop():
                         macd = calculate_macd(close_prices)
                         
                         if ema9 and ema21 and supertrend and macd is not None:
-                            
-                            # 🟢 باز کردن پوزیشن LONG با مدیریت ریسک
                             if not state.in_position and ema9 > ema21 and supertrend == 1 and macd > 0:
-                                if not check_spread(): 
-                                    time.sleep(15); continue # اگر اسپرد بالا بود، صبر کن
+                                if not check_spread(current_symbol): 
+                                    time.sleep(15); continue
                                 
                                 balance = get_account_balance()
-                                sl_price = current_price * 0.98 # ۲٪ حد ضرر
+                                sl_price = current_price * 0.98 
                                 size = calculate_position_size(balance, current_price, sl_price)
                                 
                                 if size > 0 and execute_nobitex_order("buy", size, current_price):
@@ -229,20 +229,19 @@ def bot_logic_loop():
                                     state.position_type = "long"
                                     state.entry_price = current_price
                                     state.stop_loss = sl_price
-                                    state.take_profit = current_price * 1.05 # ۵٪ حد سود
+                                    state.take_profit = current_price * 1.05 
                                     state.position_size = size
                                     db.session.commit()
-                                    msg = f"🚀 LONG باز شد!\nحجم: {size} BTC\nورود: ${current_price:,.0f}\nSL: ${sl_price:,.0f}"
-                                    add_log(f"LONG Opened. Size: {size}")
+                                    msg = f"🚀 LONG {current_symbol} باز شد!\nحجم: {size}\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f}"
+                                    add_log(f"LONG Opened on {current_symbol}. Size: {size}")
                                     send_bale_notification(msg)
                             
-                            # 🔴 باز کردن پوزیشن SHORT
                             elif not state.in_position and ema9 < ema21 and supertrend == -1 and macd < 0:
-                                if not check_spread(): 
+                                if not check_spread(current_symbol): 
                                     time.sleep(15); continue
                                 
                                 balance = get_account_balance()
-                                sl_price = current_price * 1.02 # ۲٪ حد ضرر
+                                sl_price = current_price * 1.02 
                                 size = calculate_position_size(balance, current_price, sl_price)
                                 
                                 if size > 0 and execute_nobitex_order("sell", size, current_price):
@@ -253,11 +252,10 @@ def bot_logic_loop():
                                     state.take_profit = current_price * 0.95
                                     state.position_size = size
                                     db.session.commit()
-                                    msg = f"🔻 SHORT باز شد!\nحجم: {size} BTC\nورود: ${current_price:,.0f}\nSL: ${sl_price:,.0f}"
-                                    add_log(f"SHORT Opened. Size: {size}")
+                                    msg = f"🔻 SHORT {current_symbol} باز شد!\nحجم: {size}\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f}"
+                                    add_log(f"SHORT Opened on {current_symbol}. Size: {size}")
                                     send_bale_notification(msg)
 
-                            # ⚖️ مدیریت پوزیشن باز و حد ضرر متحرک
                             elif state.in_position:
                                 if state.position_type == "long":
                                     if current_price <= state.stop_loss:
@@ -272,7 +270,6 @@ def bot_logic_loop():
                                             send_bale_notification("💰 حد سود فعال شد.")
                                             state.in_position = False
                                             db.session.commit()
-                                    # Trailing Stop
                                     elif current_price > state.entry_price * 1.02 and state.stop_loss < state.entry_price:
                                         state.stop_loss = state.entry_price
                                         db.session.commit()
@@ -290,7 +287,7 @@ def bot_logic_loop():
                                             state.in_position = False
                                             db.session.commit()
                             else:
-                                add_log(f"Analyzing... Price: ${current_price:,.0f}")
+                                add_log(f"Analyzing {current_symbol}... Price: ${current_price:,.2f}")
                 except Exception as e:
                     add_log(f"Loop Error: {e}")
         time.sleep(15)
@@ -311,7 +308,8 @@ def get_status():
         "is_active": state.is_active, "in_position": state.in_position, 
         "position_type": state.position_type, "entry_price": state.entry_price,
         "stop_loss": state.stop_loss, "take_profit": state.take_profit,
-        "position_size": state.position_size, "logs": state.logs.split('\n')
+        "position_size": state.position_size, "active_symbol": state.active_symbol,
+        "logs": state.logs.split('\n')
     })
 
 @app.route('/toggle', methods=['POST'])
@@ -321,6 +319,22 @@ def toggle_bot():
     db.session.commit()
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
+
+# 🆕 API تغییر ارز فعال
+@app.route('/set_symbol', methods=['POST'])
+def set_symbol():
+    state = BotState.query.first()
+    if state.in_position:
+        return jsonify({"status": "error", "message": "شما پوزیشن باز دارید! ابتدا پوزیشن را ببندید، سپس ارز را تغییر دهید."}), 400
+    
+    data = request.json
+    new_symbol = data.get('symbol')
+    if new_symbol:
+        state.active_symbol = new_symbol
+        state.logs = f"[System] Switched to {new_symbol}. Waiting for signals..."
+        db.session.commit()
+        return jsonify({"status": "success", "symbol": new_symbol})
+    return jsonify({"status": "error", "message": "ارز نامعتبر است."}), 400
 
 @app.route('/close_position', methods=['POST'])
 def close_position():
