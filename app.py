@@ -237,11 +237,11 @@ def analyze_chart():
                 gemini_error_msg = str(e)
                 print(f"Gemini failed: {gemini_error_msg}")
         
-        # 2. تلاش با Groq (مدل 11B Vision)
+        # 2. تلاش با Groq (مدل جدید Qwen)
         if GROQ_API_KEY:
             try:
                 response = groq_client.chat.completions.create(
-                    model="llama-3.2-11b-vision-preview",
+                    model="qwen/qwen3.8-27b", # مدل جدید و پشتیبانی‌شده برای تصویر
                     messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
                     temperature=0.5, max_tokens=1024
                 )
