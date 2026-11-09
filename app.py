@@ -192,7 +192,7 @@ def toggle_bot():
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
 
-# 🔥 مسیر تحلیل با هوش مصنوعی دوگانه
+# 🔥 مسیر تحلیل با هوش مصنوعی دوگانه (تنظیم دقیق برای متن‌های طولانی)
 @app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze_chart():
     if request.method == 'OPTIONS':
@@ -210,13 +210,16 @@ def analyze_chart():
         img.convert('RGB').save(buffered, format="JPEG")
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
         
+        # دستور جدید: درخواست تحلیل کامل اما با رعایت حجم توکن
         prompt = """
-        شما یک تحلیلگر تکنیکال حرفه‌ای هستید. تصویر چارت را بررسی کنید و تحلیل جامع به فارسی (با خط جدید برای هر بخش) بدهید:
-        1. روند کلی
-        2. حمایت و مقاومت
-        3. اندیکاتورها
-        4. الگوها
-        5. پیشنهاد معاملاتی (ورود، سود، ضرر)
+        شما یک تحلیلگر تکنیکال حرفه‌ای هستید. تصویر چارت را با دقت بررسی کنید و تحلیل جامع به فارسی (با خط جدید برای هر بخش) بدهید:
+        1. روند کلی (صعودی/نزولی/رنج)
+        2. حمایت و مقاومت (سطوح کلیدی)
+        3. اندیکاتورها (RSI, Volume, ...)
+        4. الگوها (کندلی و تکنیکال)
+        5. پیشنهاد معاملاتی (نقطه ورود، حد سود، حد ضرر، مدیریت ریسک)
+
+        ⚠️ دستور بسیار مهم: تحلیل شما باید بسیار دقیق، حرفه‌ای و خوانا باشد، اما برای اینکه متن قطع نشود، از جملات کوتاه و مفید استفاده کنید. کل پاسخ شما نباید از ۸۰۰ کلمه (توکن) بیشتر شود. به هیچ عنوان پاسخ را نیمه‌کاره رها نکنید.
         """
 
         gemini_error_msg = "کلید تنظیم نشده"
@@ -225,20 +228,25 @@ def analyze_chart():
         # 1. تلاش با Gemini
         if GEMINI_API_KEY:
             try:
-                response = gemini_client.models.generate_content(model='gemini-3.8-flash', contents=[prompt, img])
+                # تنظیم سقف خروجی گوگل روی 2048 توکن برای اطمینان
+                response = gemini_client.models.generate_content(
+                    model='gemini-3.8-flash', 
+                    contents=[prompt, img],
+                    config=types.GenerateContentConfig(max_output_tokens=2048)
+                )
                 return jsonify({"analysis": response.text})
             except Exception as e:
                 gemini_error_msg = str(e)
                 print(f"Gemini failed: {gemini_error_msg}")
         
-        # 2. تلاش با Groq (کاهش max_tokens به 900 برای عبور از محدودیت)
+        # 2. تلاش با Groq (تنظیم حداکثر مجاز روی 1000)
         if GROQ_API_KEY:
             try:
                 response = groq_client.chat.completions.create(
                     model="qwen/qwen3.8-27b",
                     messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
                     temperature=0.5, 
-                    max_tokens=900  # <---- این عدد تغییر کرد
+                    max_tokens=1000  # <---- حداکثر مجاز برای جلوگیری از خطای 429
                 )
                 return jsonify({"analysis": response.choices[0].message.content})
             except Exception as e:
