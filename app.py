@@ -61,12 +61,6 @@ with app.app_context():
     if not BotState.query.first():
         db.session.add(BotState())
         db.session.commit()
-    else:
-        # اگر دیتابیس قبلی فیلد جدید را نداشت، این خطا را نادیده می‌گیریم
-        try:
-            BotState.query.first().active_symbol
-        except:
-            pass
 
 # ================= توابع کمکی =================
 def add_log(message):
@@ -124,7 +118,6 @@ def check_spread(symbol):
 
 def execute_nobitex_order(order_type, amount, price=0):
     state = BotState.query.first()
-    # استخراج ارز پایه (مثلاً از BTCUSDT کلمه BTC را جدا میکند)
     base_currency = state.active_symbol.replace("USDT", "").lower()
 
     if TEST_MODE:
@@ -139,7 +132,7 @@ def execute_nobitex_order(order_type, amount, price=0):
     headers = {"Authorization": f"Token {NOBITEX_API_TOKEN}"}
     data = {
         "type": order_type,
-        "srcCurrency": base_currency, # ارز داینامیک شد
+        "srcCurrency": base_currency,
         "dstCurrency": "usdt",
         "amount": str(amount),
         "price": str(int(price)), 
@@ -320,7 +313,6 @@ def toggle_bot():
     add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
     return jsonify({"status": "success", "is_active": state.is_active})
 
-# 🆕 API تغییر ارز فعال
 @app.route('/set_symbol', methods=['POST'])
 def set_symbol():
     state = BotState.query.first()
@@ -349,7 +341,6 @@ def close_position():
             return jsonify({"status": "success", "message": "Position closed."})
     return jsonify({"status": "error", "message": "No open position."})
 
-# (بخش هوش مصنوعی بدون تغییر)
 @app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze_chart():
     if request.method == 'OPTIONS': return jsonify({"status": "ok"}), 200
