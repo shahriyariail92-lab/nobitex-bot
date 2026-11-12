@@ -11,7 +11,6 @@ import groq
 import PIL.Image
 import io
 import base64
-import math
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -27,7 +26,7 @@ def after_request(response):
 TEST_MODE = True 
 RISK_PER_TRADE_PERCENT = 0.02
 MAX_SPREAD_PERCENT = 0.5 
-DAILY_DRAWDOWN_LIMIT = -3.0 # حداکثر ضرر روزانه ۳ درصد
+DAILY_DRAWDOWN_LIMIT = -3.0 
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 if GEMINI_API_KEY: gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -56,7 +55,6 @@ class BotState(db.Model):
     position_size = db.Column(db.Float, default=0.0)
     active_symbol = db.Column(db.String(20), default="BTCUSDT") 
     daily_pnl_percent = db.Column(db.Float, default=0.0) 
-    consecutive_losses = db.Column(db.Integer, default=0) 
     logs = db.Column(db.Text, default="[System] Database initialized.")
 
 with app.app_context():
@@ -104,10 +102,7 @@ def get_ohlc_data(symbol, resolution=60, limit=50):
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         data = res.json()
         if data.get('s') == 'ok':
-            return {
-                "open": data['o'], "high": data['h'], "low": data['l'], 
-                "close": data['c'], "volume": data['v']
-            }
+            return {"open": data['o'], "high": data['h'], "low": data['l'], "close": data['c'], "volume": data['v']}
     except: pass
     return None
 
@@ -146,157 +141,8 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# ================= حلقه اصلی ربات =================
-def bot_logic_loop():
-    while True:
-        with app.app_context():
-            state = BotState.query.first()
-            
-            if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT:
-                if state.is_active:
-                    state.is_active = False
-                    db.session.commit()
-                    add_log("🛑 CIRCUIT BREAKER TRIGGERED! Daily loss limit reached.")
-                    send_bale_notification("🛑 ترمز اضطراری! ضرر روزانه شما به حد مجاز رسید.")
-            
-            if state and state.is_active:
-                try:
-                    current_symbol = state.active_symbol
-                    ohlc = get_ohlc_data(symbol=current_symbol)
-                    
-                    if ohlc and len(ohlc['close']) > 0:
-                        close_prices = ohlc['close']
-                        high_prices = ohlc['high']
-                        low_prices = ohlc['low']
-                        current_price = close_prices[-1]
-                        
-                        ema9 = calculate_ema(close_prices, 9)
-                        ema21 = calculate_ema(close_prices, 21)
-                        supertrend = calculate_supertrend(high_prices, low_prices, close_prices)
-                        macd = calculate_macd(close_prices)
-                        atr = calculate_atr(high_prices, low_prices, close_prices, 14)
-                        
-                        if ema9 and ema21 and supertrend and macd is not None and atr:
-                            
-                            if not state.in_position and ema9 > ema21 and supertrend == 1 and macd > 0:
-                                balance = get_account_balance()
-                                sl_price = current_price - (atr * 1.5)
-                                risk_amount = balance * RISK_PER_TRADE_PERCENT
-                                price_difference = abs(current_price - sl_price)
-                                size = round(risk_amount / price_difference, 6) if price_difference > 0 else 0
-                                
-                                if size > 0:
-                                    state.in_position = True
-                                    state.position_type = "long"
-                                    state.entry_price = current_price
-                                    state.stop_loss = sl_price
-                                    state.take_profit = current_price + (atr * 3)
-                                    state.position_size = size
-                                    db.session.commit()
-                                    msg = f"🚀 LONG {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f} (ATR)"
-                                    add_log(f"LONG Opened on {current_symbol}. ATR SL: {sl_price:.2f}")
-                                    send_bale_notification(msg)
-                            
-                            elif not state.in_position and ema9 < ema21 and supertrend == -1 and macd < 0:
-                                balance = get_account_balance()
-                                sl_price = current_price + (atr * 1.5)
-                                risk_amount = balance * RISK_PER_TRADE_PERCENT
-                                price_difference = abs(sl_price - current_price)
-                                size = round(risk_amount / price_difference, 6) if price_difference > 0 else 0
-                                
-                                if size > 0:
-                                    state.in_position = True
-                                    state.position_type = "short"
-                                    state.entry_price = current_price
-                                    state.stop_loss = sl_price
-                                    state.take_profit = current_price - (atr * 3)
-                                    state.position_size = size
-                                    db.session.commit()
-                                    msg = f"🔻 SHORT {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f} (ATR)"
-                                    add_log(f"SHORT Opened on {current_symbol}. ATR SL: {sl_price:.2f}")
-                                    send_bale_notification(msg)
-
-                            elif state.in_position:
-                                if (state.position_type == "long" and current_price <= state.stop_loss) or \
-                                   (state.position_type == "short" and current_price >= state.stop_loss):
-                                    add_log("🛑 STOP LOSS HIT! Closed.")
-                                    send_bale_notification("🛑 حد ضرر فعال شد.")
-                                    state.in_position = False
-                                    state.daily_pnl_percent -= 2.0 
-                                    db.session.commit()
-                                
-                                elif (state.position_type == "long" and current_price >= state.take_profit) or \
-                                     (state.position_type == "short" and current_price <= state.take_profit):
-                                    add_log("💰 TAKE PROFIT HIT! Closed.")
-                                    send_bale_notification("💰 حد سود فعال شد.")
-                                    state.in_position = False
-                                    state.daily_pnl_percent += 4.0 
-                                    db.session.commit()
-                            else:
-                                add_log(f"Analyzing {current_symbol}... Price: ${current_price:,.2f}")
-                except Exception as e:
-                    add_log(f"Loop Error: {e}")
-        time.sleep(15)
-
-# ================= API Routes =================
-thread_started = False
-@app.before_request
-def start_background_thread():
-    global thread_started
-    if not thread_started:
-        threading.Thread(target=bot_logic_loop, daemon=True).start()
-        thread_started = True
-
-@app.route('/status', methods=['GET'])
-def get_status():
-    state = BotState.query.first()
-    return jsonify({
-        "is_active": state.is_active, "in_position": state.in_position, 
-        "position_type": state.position_type, "entry_price": state.entry_price,
-        "stop_loss": state.stop_loss, "take_profit": state.take_profit,
-        "position_size": state.position_size, "active_symbol": state.active_symbol,
-        "daily_pnl": round(state.daily_pnl_percent, 2),
-        "logs": state.logs.split('\n')
-    })
-
-@app.route('/toggle', methods=['POST'])
-def toggle_bot():
-    state = BotState.query.first()
-    if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT and not state.is_active:
-        return jsonify({"status": "error", "message": "ترمز اضطراری فعال است!"}), 400
-        
-    state.is_active = not state.is_active
-    db.session.commit()
-    add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
-    return jsonify({"status": "success", "is_active": state.is_active})
-
-@app.route('/set_symbol', methods=['POST'])
-def set_symbol():
-    state = BotState.query.first()
-    if state.in_position:
-        return jsonify({"status": "error", "message": "شما پوزیشن باز دارید! ابتدا پوزیشن را ببندید."}), 400
-    data = request.json
-    new_symbol = data.get('symbol')
-    if new_symbol:
-        state.active_symbol = new_symbol
-        state.logs = f"[System] Switched to {new_symbol}."
-        db.session.commit()
-        return jsonify({"status": "success", "symbol": new_symbol})
-    return jsonify({"status": "error", "message": "ارز نامعتبر است."}), 400
-
-@app.route('/close_position', methods=['POST'])
-def close_position():
-    state = BotState.query.first()
-    if state.in_position:
-        state.in_position = False
-        db.session.commit()
-        add_log("🚨 Panic Close Executed.")
-        return jsonify({"status": "success", "message": "Position closed."})
-    return jsonify({"status": "error", "message": "No open position."})
-
-# 🆕 اسکنر حرفه‌ای پامپ و دامپ (بدون نیاز به numpy)
-@app.route('/scan_pump_dump', methods=['GET'])
-def scan_pump_dump():
+# ================= هسته اسکنر پامپ و دامپ =================
+def perform_pump_dump_scan():
     symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
     results = []
     
@@ -307,7 +153,6 @@ def scan_pump_dump():
             
             closes = ohlc['close']
             volumes = ohlc['volume']
-            
             if len(closes) < 20 or len(volumes) < 20: continue
             
             current_price = closes[-1]
@@ -318,13 +163,10 @@ def scan_pump_dump():
             if current_vol == 0: continue
 
             sma20 = sum(closes[-20:]) / 20
-            # محاسبه انحراف معیار با پایتون خالص
             variance = sum((x - sma20) ** 2 for x in closes[-20:]) / 20
             std_dev = variance ** 0.5
-            
             bb_width = ((sma20 + (2 * std_dev)) - (sma20 - (2 * std_dev))) / sma20 * 100
             
-            # RSI
             gains, losses = [], []
             for i in range(1, len(closes)):
                 change = closes[i] - closes[i-1]
@@ -361,11 +203,182 @@ def scan_pump_dump():
             })
         except Exception as e:
             print(f"Error scanning {sym}: {e}")
-            continue
-        
-    return jsonify(results)
+            
+    return results
 
-# ================= AI Route =================
+# ================= ترد ۱: ربات معامله‌گر =================
+def bot_logic_loop():
+    while True:
+        with app.app_context():
+            state = BotState.query.first()
+            
+            if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT:
+                if state.is_active:
+                    state.is_active = False
+                    db.session.commit()
+                    add_log("🛑 CIRCUIT BREAKER TRIGGERED!")
+                    send_bale_notification("🤖 [ربات معامله‌گر]\n🛑 ترمز اضطراری! ضرر روزانه به حد مجاز رسید.")
+            
+            if state and state.is_active:
+                try:
+                    current_symbol = state.active_symbol
+                    ohlc = get_ohlc_data(symbol=current_symbol)
+                    
+                    if ohlc and len(ohlc['close']) > 0:
+                        close_prices = ohlc['close']
+                        current_price = close_prices[-1]
+                        
+                        ema9 = calculate_ema(close_prices, 9)
+                        ema21 = calculate_ema(close_prices, 21)
+                        supertrend = calculate_supertrend(ohlc['high'], ohlc['low'], close_prices)
+                        macd = calculate_macd(close_prices)
+                        atr = calculate_atr(ohlc['high'], ohlc['low'], close_prices, 14)
+                        
+                        if ema9 and ema21 and supertrend and macd is not None and atr:
+                            if not state.in_position and ema9 > ema21 and supertrend == 1 and macd > 0:
+                                balance = get_account_balance()
+                                sl_price = current_price - (atr * 1.5)
+                                price_diff = abs(current_price - sl_price)
+                                size = round((balance * RISK_PER_TRADE_PERCENT) / price_diff, 6) if price_diff > 0 else 0
+                                
+                                if size > 0:
+                                    state.in_position = True
+                                    state.position_type = "long"
+                                    state.entry_price = current_price
+                                    state.stop_loss = sl_price
+                                    state.take_profit = current_price + (atr * 3)
+                                    state.position_size = size
+                                    db.session.commit()
+                                    msg = f"🤖 [ربات معامله‌گر]\n🚀 LONG {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f}"
+                                    add_log(f"LONG Opened on {current_symbol}.")
+                                    send_bale_notification(msg)
+                            
+                            elif not state.in_position and ema9 < ema21 and supertrend == -1 and macd < 0:
+                                balance = get_account_balance()
+                                sl_price = current_price + (atr * 1.5)
+                                price_diff = abs(sl_price - current_price)
+                                size = round((balance * RISK_PER_TRADE_PERCENT) / price_diff, 6) if price_diff > 0 else 0
+                                
+                                if size > 0:
+                                    state.in_position = True
+                                    state.position_type = "short"
+                                    state.entry_price = current_price
+                                    state.stop_loss = sl_price
+                                    state.take_profit = current_price - (atr * 3)
+                                    state.position_size = size
+                                    db.session.commit()
+                                    msg = f"🤖 [ربات معامله‌گر]\n🔻 SHORT {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f}"
+                                    add_log(f"SHORT Opened on {current_symbol}.")
+                                    send_bale_notification(msg)
+
+                            elif state.in_position:
+                                if (state.position_type == "long" and current_price <= state.stop_loss) or \
+                                   (state.position_type == "short" and current_price >= state.stop_loss):
+                                    add_log("🛑 STOP LOSS HIT!")
+                                    send_bale_notification("🤖 [ربات معامله‌گر]\n🛑 حد ضرر فعال شد.")
+                                    state.in_position = False
+                                    state.daily_pnl_percent -= 2.0 
+                                    db.session.commit()
+                                
+                                elif (state.position_type == "long" and current_price >= state.take_profit) or \
+                                     (state.position_type == "short" and current_price <= state.take_profit):
+                                    add_log("💰 TAKE PROFIT HIT!")
+                                    send_bale_notification("🤖 [ربات معامله‌گر]\n💰 حد سود فعال شد.")
+                                    state.in_position = False
+                                    state.daily_pnl_percent += 4.0 
+                                    db.session.commit()
+                            else:
+                                add_log(f"Analyzing {current_symbol}... Price: ${current_price:,.2f}")
+                except Exception as e:
+                    add_log(f"Loop Error: {e}")
+        time.sleep(15)
+
+# ================= ترد ۲: اسکنر خودکار پامپ و دامپ =================
+last_alerts = {} # برای جلوگیری از اسپم (هر ارز هر ۱ ساعت یکبار هشدار)
+
+def pump_dump_auto_loop():
+    time.sleep(30) # صبر اولیه برای بالا آمدن کامل سرور
+    while True:
+        try:
+            results = perform_pump_dump_scan()
+            current_time = time.time()
+            
+            for item in results:
+                # اگر امتیاز بالای ۸۵ بود (سیگنال قوی)
+                if item['score'] >= 85:
+                    sym = item['symbol']
+                    # بررسی اینکه آیا در ۱ ساعت گذشته برای این ارز پیام فرستاده‌ایم یا نه
+                    if sym not in last_alerts or (current_time - last_alerts[sym] > 3600):
+                        msg = f"🚨 [رادار پامپ/دامپ]\nسیگنال {item['status']} برای {sym}!\nقیمت: ${item['price']:,.4f}\nRSI: {item['rsi']} | فشردگی: {item['bb_width']}%\nاحتمال: {item['score']}%"
+                        send_bale_notification(msg)
+                        last_alerts[sym] = current_time # ثبت زمان ارسال
+                        
+        except Exception as e:
+            print(f"Pump Dump Loop Error: {e}")
+            
+        time.sleep(300) # هر ۵ دقیقه یکبار کل بازار را اسکن میکند
+
+# ================= اجرای تردها =================
+threads_started = False
+@app.before_request
+def start_background_threads():
+    global threads_started
+    if not threads_started:
+        threading.Thread(target=bot_logic_loop, daemon=True).start()
+        threading.Thread(target=pump_dump_auto_loop, daemon=True).start()
+        threads_started = True
+
+# ================= API Routes =================
+@app.route('/status', methods=['GET'])
+def get_status():
+    state = BotState.query.first()
+    return jsonify({
+        "is_active": state.is_active, "in_position": state.in_position, 
+        "position_type": state.position_type, "entry_price": state.entry_price,
+        "stop_loss": state.stop_loss, "take_profit": state.take_profit,
+        "position_size": state.position_size, "active_symbol": state.active_symbol,
+        "daily_pnl": round(state.daily_pnl_percent, 2),
+        "logs": state.logs.split('\n')
+    })
+
+@app.route('/toggle', methods=['POST'])
+def toggle_bot():
+    state = BotState.query.first()
+    if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT and not state.is_active:
+        return jsonify({"status": "error", "message": "ترمز اضطراری فعال است!"}), 400
+    state.is_active = not state.is_active
+    db.session.commit()
+    add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
+    return jsonify({"status": "success", "is_active": state.is_active})
+
+@app.route('/set_symbol', methods=['POST'])
+def set_symbol():
+    state = BotState.query.first()
+    if state.in_position:
+        return jsonify({"status": "error", "message": "شما پوزیشن باز دارید!"}), 400
+    data = request.json
+    new_symbol = data.get('symbol')
+    if new_symbol:
+        state.active_symbol = new_symbol
+        state.logs = f"[System] Switched to {new_symbol}."
+        db.session.commit()
+        return jsonify({"status": "success", "symbol": new_symbol})
+    return jsonify({"status": "error", "message": "ارز نامعتبر است."}), 400
+
+@app.route('/close_position', methods=['POST'])
+def close_position():
+    state = BotState.query.first()
+    if state.in_position:
+        state.in_position = False
+        db.session.commit()
+        add_log("🚨 Panic Close Executed.")
+        return jsonify({"status": "success", "message": "Position closed."})
+    return jsonify({"status": "error", "message": "No open position."})
+
+@app.route('/scan_pump_dump', methods=['GET'])
+def api_scan_pump_dump():
+    return jsonify(perform_pump_dump_scan())
+
 @app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze_chart():
     if request.method == 'OPTIONS': return jsonify({"status": "ok"}), 200
@@ -378,7 +391,7 @@ def analyze_chart():
         img.convert('RGB').save(buffered, format="JPEG")
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
         
-        prompt = "شما یک تحلیلگر تکنیکال هستید. تصویر چارت را بررسی کنید و تحلیل جامع به فارسی (با خط جدید برای هر بخش) بدهید: 1. روند کلی 2. حمایت و مقاومت 3. اندیکاتورها 4. الگوها 5. پیشنهاد معاملاتی (ورود، سود، ضرر). کوتاه و مفید باشد."
+        prompt = "شما یک تحلیلگر تکنیکال هستید. تصویر چارت را بررسی کنید و تحلیل جامع به فارسی بدهید."
         
         if GEMINI_API_KEY:
             try:
