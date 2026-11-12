@@ -294,29 +294,27 @@ def bot_logic_loop():
         time.sleep(15)
 
 # ================= ترد ۲: اسکنر خودکار پامپ و دامپ =================
-last_alerts = {} # برای جلوگیری از اسپم (هر ارز هر ۱ ساعت یکبار هشدار)
+last_alerts = {} 
 
 def pump_dump_auto_loop():
-    time.sleep(30) # صبر اولیه برای بالا آمدن کامل سرور
+    time.sleep(30) 
     while True:
         try:
             results = perform_pump_dump_scan()
             current_time = time.time()
             
             for item in results:
-                # اگر امتیاز بالای ۸۵ بود (سیگنال قوی)
                 if item['score'] >= 85:
                     sym = item['symbol']
-                    # بررسی اینکه آیا در ۱ ساعت گذشته برای این ارز پیام فرستاده‌ایم یا نه
                     if sym not in last_alerts or (current_time - last_alerts[sym] > 3600):
                         msg = f"🚨 [رادار پامپ/دامپ]\nسیگنال {item['status']} برای {sym}!\nقیمت: ${item['price']:,.4f}\nRSI: {item['rsi']} | فشردگی: {item['bb_width']}%\nاحتمال: {item['score']}%"
                         send_bale_notification(msg)
-                        last_alerts[sym] = current_time # ثبت زمان ارسال
+                        last_alerts[sym] = current_time 
                         
         except Exception as e:
             print(f"Pump Dump Loop Error: {e}")
             
-        time.sleep(300) # هر ۵ دقیقه یکبار کل بازار را اسکن میکند
+        time.sleep(300) 
 
 # ================= اجرای تردها =================
 threads_started = False
@@ -391,25 +389,36 @@ def analyze_chart():
         img.convert('RGB').save(buffered, format="JPEG")
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
         
-        prompt = "شما یک تحلیلگر تکنیکال هستید. تصویر چارت را بررسی کنید و تحلیل جامع به فارسی بدهید."
+        prompt = "شما یک تحلیلگر تکنیکال هستید. تصویر چارت را بررسی کنید و تحلیل جامع به فارسی (با خط جدید برای هر بخش) بدهید: 1. روند کلی 2. حمایت و مقاومت 3. اندیکاتورها 4. الگوها 5. پیشنهاد معاملاتی (ورود، سود، ضرر). کوتاه و مفید باشد."
         
+        gemini_err = ""
+        groq_err = ""
+
         if GEMINI_API_KEY:
             try:
-                response = gemini_client.models.generate_content(model='gemini-1.5-flash', contents=[prompt, img])
+                response = gemini_client.models.generate_content(
+                    model='gemini-1.5-flash-latest', 
+                    contents=[prompt, img]
+                )
                 return jsonify({"analysis": response.text})
-            except Exception as e: print(f"Gemini failed: {e}")
+            except Exception as e: 
+                gemini_err = str(e)
+                print(f"Gemini failed: {gemini_err}")
             
         if GROQ_API_KEY:
             try:
                 response = groq_client.chat.completions.create(
-                    model="llama-3.2-11b-vision-preview",
+                    model="llama-3.2-11b-vision-preview", 
                     messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
                     temperature=0.5, max_tokens=1000
                 )
                 return jsonify({"analysis": response.choices[0].message.content})
-            except Exception as e: print(f"Groq failed: {e}")
+            except Exception as e: 
+                groq_err = str(e)
+                print(f"Groq failed: {groq_err}")
             
-        return jsonify({"error": "سرویس هوش مصنوعی در دسترس نیست."}), 500
+        return jsonify({"error": f"گوگل: {gemini_err[:50]}... | Groq: {groq_err[:50]}..."}), 500
+        
     except Exception as e:
         return jsonify({"error": f"خطای سرور: {str(e)}"}), 500
 
