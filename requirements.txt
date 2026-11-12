@@ -7,3 +7,4 @@ gunicorn
 google-genai
 Pillow
 groq
+numpy
