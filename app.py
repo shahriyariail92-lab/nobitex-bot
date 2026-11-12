@@ -11,7 +11,7 @@ import groq
 import PIL.Image
 import io
 import base64
-import numpy as np
+import math
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -55,8 +55,8 @@ class BotState(db.Model):
     take_profit = db.Column(db.Float, default=0.0)
     position_size = db.Column(db.Float, default=0.0)
     active_symbol = db.Column(db.String(20), default="BTCUSDT") 
-    daily_pnl_percent = db.Column(db.Float, default=0.0) # 🆕 ردیابی سود/ضرر روزانه
-    consecutive_losses = db.Column(db.Integer, default=0) # 🆕 شمارش ضررهای متوالی
+    daily_pnl_percent = db.Column(db.Float, default=0.0) 
+    consecutive_losses = db.Column(db.Integer, default=0) 
     logs = db.Column(db.Text, default="[System] Database initialized.")
 
 with app.app_context():
@@ -101,7 +101,7 @@ def get_ohlc_data(symbol, resolution=60, limit=50):
     start_time = end_time - (limit * resolution * 60)
     url = f"https://apiv2.nobitex.ir/market/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
     try:
-        res = requests.get(url, headers={'User-Agent': 'TraderBot/1.0'}, timeout=10)
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         data = res.json()
         if data.get('s') == 'ok':
             return {
@@ -139,7 +139,6 @@ def calculate_macd(prices):
     return ema_fast - ema_slow
 
 def calculate_atr(highs, lows, closes, period=14):
-    """محاسبه ATR برای تعیین حد ضرر داینامیک (تکنیک حرفه‌ای‌ها)"""
     if len(closes) < period + 1: return None
     tr_list = []
     for i in range(1, len(closes)):
@@ -153,13 +152,12 @@ def bot_logic_loop():
         with app.app_context():
             state = BotState.query.first()
             
-            # 🆕 ترمز اضطراری (Circuit Breaker)
             if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT:
                 if state.is_active:
                     state.is_active = False
                     db.session.commit()
-                    add_log("🛑 CIRCUIT BREAKER TRIGGERED! Daily loss limit reached. Bot stopped.")
-                    send_bale_notification("🛑 ترمز اضطراری! ضرر روزانه شما به حد مجاز رسید و ربات متوقف شد.")
+                    add_log("🛑 CIRCUIT BREAKER TRIGGERED! Daily loss limit reached.")
+                    send_bale_notification("🛑 ترمز اضطراری! ضرر روزانه شما به حد مجاز رسید.")
             
             if state and state.is_active:
                 try:
@@ -176,50 +174,37 @@ def bot_logic_loop():
                         ema21 = calculate_ema(close_prices, 21)
                         supertrend = calculate_supertrend(high_prices, low_prices, close_prices)
                         macd = calculate_macd(close_prices)
-                        atr = calculate_atr(high_prices, low_prices, close_prices, 14) # 🆕 محاسبه ATR
+                        atr = calculate_atr(high_prices, low_prices, close_prices, 14)
                         
                         if ema9 and ema21 and supertrend and macd is not None and atr:
                             
-                            # 🟢 سیگنال خرید (LONG)
                             if not state.in_position and ema9 > ema21 and supertrend == 1 and macd > 0:
-                                if not check_spread(current_symbol): 
-                                    time.sleep(15); continue
-                                
                                 balance = get_account_balance()
-                                
-                                # 🆕 استفاده از ATR برای حد ضرر داینامیک
-                                # در معامله‌گری حرفه‌ای، حد ضرر ۱.۵ برابر ATR پایین‌تر قرار می‌گیرد
                                 sl_price = current_price - (atr * 1.5)
                                 risk_amount = balance * RISK_PER_TRADE_PERCENT
                                 price_difference = abs(current_price - sl_price)
                                 size = round(risk_amount / price_difference, 6) if price_difference > 0 else 0
                                 
-                                if size > 0 and execute_nobitex_order("buy", size, current_price):
+                                if size > 0:
                                     state.in_position = True
                                     state.position_type = "long"
                                     state.entry_price = current_price
                                     state.stop_loss = sl_price
-                                    state.take_profit = current_price + (atr * 3) # حد سود ۳ برابر ATR
+                                    state.take_profit = current_price + (atr * 3)
                                     state.position_size = size
                                     db.session.commit()
-                                    msg = f"🚀 LONG {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f} (ATR Based)\nTP: ${state.take_profit:,.2f}"
+                                    msg = f"🚀 LONG {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f} (ATR)"
                                     add_log(f"LONG Opened on {current_symbol}. ATR SL: {sl_price:.2f}")
                                     send_bale_notification(msg)
                             
-                            # 🔴 سیگنال فروش (SHORT)
                             elif not state.in_position and ema9 < ema21 and supertrend == -1 and macd < 0:
-                                if not check_spread(current_symbol): 
-                                    time.sleep(15); continue
-                                
                                 balance = get_account_balance()
-                                
-                                # 🆕 استفاده از ATR برای حد ضرر داینامیک (SHORT)
                                 sl_price = current_price + (atr * 1.5)
                                 risk_amount = balance * RISK_PER_TRADE_PERCENT
                                 price_difference = abs(sl_price - current_price)
                                 size = round(risk_amount / price_difference, 6) if price_difference > 0 else 0
                                 
-                                if size > 0 and execute_nobitex_order("sell", size, current_price):
+                                if size > 0:
                                     state.in_position = True
                                     state.position_type = "short"
                                     state.entry_price = current_price
@@ -227,79 +212,31 @@ def bot_logic_loop():
                                     state.take_profit = current_price - (atr * 3)
                                     state.position_size = size
                                     db.session.commit()
-                                    msg = f"🔻 SHORT {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f} (ATR Based)\nTP: ${state.take_profit:,.2f}"
+                                    msg = f"🔻 SHORT {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f} (ATR)"
                                     add_log(f"SHORT Opened on {current_symbol}. ATR SL: {sl_price:.2f}")
                                     send_bale_notification(msg)
 
                             elif state.in_position:
-                                # بستن پوزیشن با حد ضرر یا حد سود
                                 if (state.position_type == "long" and current_price <= state.stop_loss) or \
                                    (state.position_type == "short" and current_price >= state.stop_loss):
-                                    
-                                    close_type = "sell" if state.position_type == "long" else "buy"
-                                    if execute_nobitex_order(close_type, state.position_size, current_price):
-                                        add_log("🛑 STOP LOSS HIT! Closed.")
-                                        send_bale_notification("🛑 حد ضرر فعال شد. پوزیشن بسته شد.")
-                                        state.in_position = False
-                                        state.daily_pnl_percent -= 2.0 # فرض ضرر ۲ درصدی
-                                        state.consecutive_losses += 1
-                                        db.session.commit()
+                                    add_log("🛑 STOP LOSS HIT! Closed.")
+                                    send_bale_notification("🛑 حد ضرر فعال شد.")
+                                    state.in_position = False
+                                    state.daily_pnl_percent -= 2.0 
+                                    db.session.commit()
                                 
                                 elif (state.position_type == "long" and current_price >= state.take_profit) or \
                                      (state.position_type == "short" and current_price <= state.take_profit):
-                                    
-                                    close_type = "sell" if state.position_type == "long" else "buy"
-                                    if execute_nobitex_order(close_type, state.position_size, current_price):
-                                        add_log("💰 TAKE PROFIT HIT! Closed.")
-                                        send_bale_notification("💰 حد سود فعال شد. پوزیشن با سود بسته شد.")
-                                        state.in_position = False
-                                        state.daily_pnl_percent += 4.0 # فرض سود ۴ درصدی
-                                        state.consecutive_losses = 0
-                                        db.session.commit()
+                                    add_log("💰 TAKE PROFIT HIT! Closed.")
+                                    send_bale_notification("💰 حد سود فعال شد.")
+                                    state.in_position = False
+                                    state.daily_pnl_percent += 4.0 
+                                    db.session.commit()
                             else:
                                 add_log(f"Analyzing {current_symbol}... Price: ${current_price:,.2f}")
                 except Exception as e:
                     add_log(f"Loop Error: {e}")
         time.sleep(15)
-
-def check_spread(symbol):
-    if TEST_MODE: return True
-    try:
-        url = f"https://apiv2.nobitex.ir/orderbook/{symbol}"
-        res = requests.get(url, timeout=10).json()
-        if res.get('status') == 'ok':
-            best_buy = float(res['bids'][0][0])
-            best_sell = float(res['asks'][0][0])
-            spread_percent = ((best_sell - best_buy) / best_buy) * 100
-            if spread_percent > MAX_SPREAD_PERCENT: return False
-            return True
-    except: pass
-    return True
-
-def execute_nobitex_order(order_type, amount, price=0):
-    state = BotState.query.first()
-    base_currency = state.active_symbol.replace("USDT", "").lower()
-    if TEST_MODE:
-        add_log(f"🧪 [TEST] {order_type.upper()} {amount} {base_currency.upper()} placed.")
-        return True
-    if not NOBITEX_API_TOKEN: return False
-
-    # 🆕 ثبت سفارش به عنوان Maker برای کارمزد کمتر
-    url = "https://apiv2.nobitex.ir/orders/add"
-    headers = {"Authorization": f"Token {NOBITEX_API_TOKEN}"}
-    
-    # قیمت Limit را کمی بهتر از بازار قرار می‌دهیم
-    if order_type == "buy": price = price * 0.999 
-    elif order_type == "sell": price = price * 1.001
-        
-    data = {
-        "type": order_type, "srcCurrency": base_currency, "dstCurrency": "usdt",
-        "amount": str(amount), "price": str(int(price)), "execution": "limit"
-    }
-    try:
-        res = requests.post(url, headers=headers, data=data, timeout=10)
-        return res.json().get('status') == 'ok'
-    except: return False
 
 # ================= API Routes =================
 thread_started = False
@@ -326,7 +263,7 @@ def get_status():
 def toggle_bot():
     state = BotState.query.first()
     if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT and not state.is_active:
-        return jsonify({"status": "error", "message": "ترمز اضطراری فعال است! تا فردا نمی‌توانید ربات را روشن کنید."}), 400
+        return jsonify({"status": "error", "message": "ترمز اضطراری فعال است!"}), 400
         
     state.is_active = not state.is_active
     db.session.commit()
@@ -351,78 +288,117 @@ def set_symbol():
 def close_position():
     state = BotState.query.first()
     if state.in_position:
-        order_type = "sell" if state.position_type == "long" else "buy"
-        if execute_nobitex_order(order_type, state.position_size, 0):
-            state.in_position = False
-            db.session.commit()
-            add_log("🚨 Panic Close Executed.")
-            return jsonify({"status": "success", "message": "Position closed."})
+        state.in_position = False
+        db.session.commit()
+        add_log("🚨 Panic Close Executed.")
+        return jsonify({"status": "success", "message": "Position closed."})
     return jsonify({"status": "error", "message": "No open position."})
 
-# 🆕 اسکنر حرفه‌ای پامپ و دامپ با فیلتر نقدشوندگی
+# 🆕 اسکنر حرفه‌ای پامپ و دامپ (بدون نیاز به numpy)
 @app.route('/scan_pump_dump', methods=['GET'])
 def scan_pump_dump():
-    # فقط ارزهای بزرگ و با نقدشوندگی بالا
-    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "BNBUSDT"]
+    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
     results = []
     
     for sym in symbols:
-        ohlc = get_ohlc_data(symbol=sym, resolution=15, limit=30)
-        if not ohlc: continue
-        
-        closes = ohlc['close']
-        volumes = ohlc['volume']
-        
-        if len(closes) < 20 or len(volumes) < 20: continue
-        
-        current_price = closes[-1]
-        current_vol = volumes[-1]
-        avg_vol = sum(volumes[-20:]) / 20
-        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1
-        
-        # فیلتر نقدشوندگی (حجم ریالی بالای ۵۰۰ هزار دلار)
-        volume_usdt = current_vol * current_price
-        if volume_usdt < 500000:
+        try:
+            ohlc = get_ohlc_data(symbol=sym, resolution=15, limit=30)
+            if not ohlc: continue
+            
+            closes = ohlc['close']
+            volumes = ohlc['volume']
+            
+            if len(closes) < 20 or len(volumes) < 20: continue
+            
+            current_price = closes[-1]
+            current_vol = volumes[-1]
+            avg_vol = sum(volumes[-20:]) / 20
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1
+            
+            if current_vol == 0: continue
+
+            sma20 = sum(closes[-20:]) / 20
+            # محاسبه انحراف معیار با پایتون خالص
+            variance = sum((x - sma20) ** 2 for x in closes[-20:]) / 20
+            std_dev = variance ** 0.5
+            
+            bb_width = ((sma20 + (2 * std_dev)) - (sma20 - (2 * std_dev))) / sma20 * 100
+            
+            # RSI
+            gains, losses = [], []
+            for i in range(1, len(closes)):
+                change = closes[i] - closes[i-1]
+                gains.append(change if change > 0 else 0)
+                losses.append(abs(change) if change < 0 else 0)
+            
+            avg_gain = sum(gains[-14:]) / 14 if len(gains) >= 14 else 0
+            avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 0
+            rsi = 100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss > 0 else 100
+            
+            status = "عادی"
+            color = "#64748B"
+            score = 0
+            
+            if bb_width < 3.0:
+                status = "در حال جمع شدن انرژی (فشردگی)"
+                color = "#F59E0B"
+                score = int(85 - (bb_width * 10)) 
+                if score < 50: score = 50
+
+            if vol_ratio > 2.0: 
+                if rsi > 65:
+                    status = "🔴 هشدار دامپ (فروش نهنگ)"
+                    color = "#EF4444"
+                    score = min(100, int(70 + (vol_ratio * 5) + (rsi - 65)))
+                elif rsi < 35:
+                    status = "🟢 احتمال پامپ (خرید نهنگ)"
+                    color = "#10B981"
+                    score = min(100, int(70 + (vol_ratio * 5) + (35 - rsi)))
+
+            results.append({
+                "symbol": sym.replace("USDT", ""), "price": current_price, "vol_ratio": round(vol_ratio, 2),
+                "bb_width": round(bb_width, 2), "rsi": round(rsi, 2), "status": status, "score": score, "color": color
+            })
+        except Exception as e:
+            print(f"Error scanning {sym}: {e}")
             continue
-
-        sma20 = sum(closes[-20:]) / 20
-        std_dev = np.std(closes[-20:])
-        bb_width = ((sma20 + (2 * std_dev)) - (sma20 - (2 * std_dev))) / sma20 * 100
-        
-        # RSI
-        gains, losses = [], []
-        for i in range(1, len(closes)):
-            change = closes[i] - closes[i-1]
-            gains.append(change if change > 0 else 0)
-            losses.append(abs(change) if change < 0 else 0)
-        rsi = 100 - (100 / (1 + (sum(gains[-14:])/14 / (sum(losses[-14:])/14)))) if sum(losses[-14:]) > 0 else 100
-        
-        status = "عادی"
-        color = "#64748B"
-        score = 0
-        
-        if bb_width < 3.0:
-            status = "در حال جمع شدن انرژی (فشردگی)"
-            color = "#F59E0B"
-            score = int(85 - (bb_width * 10)) 
-            if score < 50: score = 50
-
-        if vol_ratio > 2.0: 
-            if rsi > 65:
-                status = "🔴 هشدار دامپ (فروش نهنگ)"
-                color = "#EF4444"
-                score = min(100, int(70 + (vol_ratio * 5) + (rsi - 65)))
-            elif rsi < 35:
-                status = "🟢 احتمال پامپ (خرید نهنگ)"
-                color = "#10B981"
-                score = min(100, int(70 + (vol_ratio * 5) + (35 - rsi)))
-
-        results.append({
-            "symbol": sym.replace("USDT", ""), "price": current_price, "vol_ratio": round(vol_ratio, 2),
-            "bb_width": round(bb_width, 2), "rsi": round(rsi, 2), "status": status, "score": score, "color": color
-        })
         
     return jsonify(results)
+
+# ================= AI Route =================
+@app.route('/analyze', methods=['POST', 'OPTIONS'])
+def analyze_chart():
+    if request.method == 'OPTIONS': return jsonify({"status": "ok"}), 200
+    if 'image' not in request.files: return jsonify({"error": "عکسی ارسال نشده است."}), 400
+    try:
+        file = request.files['image']
+        img = PIL.Image.open(io.BytesIO(file.read()))
+        img.thumbnail((800, 800))
+        buffered = io.BytesIO()
+        img.convert('RGB').save(buffered, format="JPEG")
+        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        
+        prompt = "شما یک تحلیلگر تکنیکال هستید. تصویر چارت را بررسی کنید و تحلیل جامع به فارسی (با خط جدید برای هر بخش) بدهید: 1. روند کلی 2. حمایت و مقاومت 3. اندیکاتورها 4. الگوها 5. پیشنهاد معاملاتی (ورود، سود، ضرر). کوتاه و مفید باشد."
+        
+        if GEMINI_API_KEY:
+            try:
+                response = gemini_client.models.generate_content(model='gemini-1.5-flash', contents=[prompt, img])
+                return jsonify({"analysis": response.text})
+            except Exception as e: print(f"Gemini failed: {e}")
+            
+        if GROQ_API_KEY:
+            try:
+                response = groq_client.chat.completions.create(
+                    model="llama-3.2-11b-vision-preview",
+                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
+                    temperature=0.5, max_tokens=1000
+                )
+                return jsonify({"analysis": response.choices[0].message.content})
+            except Exception as e: print(f"Groq failed: {e}")
+            
+        return jsonify({"error": "سرویس هوش مصنوعی در دسترس نیست."}), 500
+    except Exception as e:
+        return jsonify({"error": f"خطای سرور: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
