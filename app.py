@@ -11,6 +11,7 @@ import groq
 import PIL.Image
 import io
 import base64
+import numpy as np # برای محاسبات ریاضی
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -52,7 +53,6 @@ class BotState(db.Model):
     stop_loss = db.Column(db.Float, default=0.0)
     take_profit = db.Column(db.Float, default=0.0)
     position_size = db.Column(db.Float, default=0.0)
-    # 🆕 اضافه شدن فیلد ارز فعال
     active_symbol = db.Column(db.String(20), default="BTCUSDT") 
     logs = db.Column(db.Text, default="[System] Database initialized.")
 
@@ -158,7 +158,7 @@ def get_ohlc_data(symbol, resolution=60, limit=50):
         res = requests.get(url, headers={'User-Agent': 'TraderBot/1.0'}, timeout=10)
         data = res.json()
         if data.get('s') == 'ok':
-            return {"open": data['o'], "high": data['h'], "low": data['l'], "close": data['c']}
+            return {"open": data['o'], "high": data['h'], "low": data['l'], "close": data['c'], "volume": data['v']}
     except: pass
     return None
 
@@ -375,6 +375,88 @@ def analyze_chart():
         return jsonify({"error": "هر دو سرویس هوش مصنوعی در دسترس نیستند."}), 500
     except Exception as e:
         return jsonify({"error": f"خطای سرور: {str(e)}"}), 500
+
+# 🆕 API اسکنر پامپ و دامپ
+@app.route('/scan_pump_dump', methods=['GET'])
+def scan_pump_dump():
+    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+    results = []
+    
+    for sym in symbols:
+        # دریافت داده‌های ۱۵ دقیقه‌ای (برای تشخیص حرکات سریع)
+        ohlc = get_ohlc_data(symbol=sym, resolution=15, limit=30)
+        if not ohlc: continue
+        
+        closes = ohlc['close']
+        volumes = ohlc['volume']
+        
+        if len(closes) < 20 or len(volumes) < 20: continue
+        
+        current_price = closes[-1]
+        current_vol = volumes[-1]
+        
+        # 1. میانگین حجم ۲۰ کندل گذشته
+        avg_vol = sum(volumes[-20:]) / 20
+        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1
+        
+        # 2. محاسبه باند بولینگر (برای تشخیص فشردگی)
+        sma20 = sum(closes[-20:]) / 20
+        std_dev = np.std(closes[-20:])
+        upper_band = sma20 + (2 * std_dev)
+        lower_band = sma20 - (2 * std_dev)
+        bb_width = (upper_band - lower_band) / sma20 * 100 # درصد عرض باند
+        
+        # 3. محاسبه RSI ۱۴
+        gains, losses = [], []
+        for i in range(1, len(closes)):
+            change = closes[i] - closes[i-1]
+            gains.append(change if change > 0 else 0)
+            losses.append(abs(change) if change < 0 else 0)
+        avg_gain = sum(gains[-14:]) / 14
+        avg_loss = sum(losses[-14:]) / 14
+        rsi = 100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss > 0 else 100
+        
+        # 🧠 منطق تشخیص پامپ و دامپ
+        status = "عادی"
+        score = 0
+        color = "#64748B"
+        
+        # فشردگی بولینگر + RSI پایین = احتمال پامپ
+        if bb_width < 2.0 and rsi < 40:
+            status = "احتمال پامپ (فشردگی)"
+            score = 85
+            color = "#10B981"
+        
+        # حجم انفجاری + RSI بالا = احتمال دامپ
+        elif vol_ratio > 3.0 and rsi > 70:
+            status = "هشدار دامپ (حجم بالا)"
+            score = 90
+            color = "#EF4444"
+            
+        # حجم انفجاری + RSI پایین = احتمال پامپ
+        elif vol_ratio > 3.0 and rsi < 30:
+            status = "احتمال پامپ (خرید نهنگ)"
+            score = 80
+            color = "#10B981"
+            
+        # نزدیک به فشردگی
+        elif bb_width < 3.0:
+            status = "در حال جمع شدن انرژی"
+            score = 50
+            color = "#F59E0B"
+
+        results.append({
+            "symbol": sym.replace("USDT", ""),
+            "price": current_price,
+            "vol_ratio": round(vol_ratio, 2),
+            "bb_width": round(bb_width, 2),
+            "rsi": round(rsi, 2),
+            "status": status,
+            "score": score,
+            "color": color
+        })
+        
+    return jsonify(results)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
