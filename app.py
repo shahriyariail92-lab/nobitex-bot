@@ -42,11 +42,16 @@ BALE_BOT_TOKEN = os.environ.get('BALE_BOT_TOKEN', '')
 BALE_CHAT_ID = os.environ.get('BALE_CHAT_ID', '')
 NOBITEX_API_TOKEN = os.environ.get('NOBITEX_API_TOKEN', '')
 
-# ================= دیتابیس =================
-db_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
-if db_url.startswith("postgres://"): 
-    db_url = db_url.replace("postgres://", "postgresql://", 1)
-app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+# ================= تنظیمات دیتابیس =================
+db_url_str = os.environ.get('DATABASE_URL', 'sqlite:///local.db').strip()
+
+# اصلاح لینک برای استفاده از psycopg2 در SQLAlchemy
+if db_url_str.startswith("postgres://"):
+    db_url_str = db_url_str.replace("postgres://", "postgresql+psycopg2://", 1)
+elif db_url_str.startswith("postgresql://") and not db_url_str.startswith("postgresql+psycopg2://"):
+    db_url_str = db_url_str.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url_str
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
@@ -214,11 +219,11 @@ def perform_pump_dump_scan():
 
             if vol_ratio > 2.0: 
                 if rsi > 65:
-                    status = "🔴 هشدار دامپ (فروش نهنگ)"
+                    status = "هشدار دامپ (فروش نهنگ)"
                     color = "#EF4444"
                     score = min(100, int(70 + (vol_ratio * 5) + (rsi - 65)))
                 elif rsi < 35:
-                    status = "🟢 احتمال پامپ (خرید نهنگ)"
+                    status = "احتمال پامپ (خرید نهنگ)"
                     color = "#10B981"
                     score = min(100, int(70 + (vol_ratio * 5) + (35 - rsi)))
 
@@ -242,14 +247,14 @@ def bot_logic_loop():
                 state.daily_pnl_percent = 0.0
                 state.last_reset_date = today_str
                 db.session.commit()
-                add_log("🔄 Daily PnL Reset to 0%.")
+                add_log("Daily PnL Reset to 0%.")
             
             if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT:
                 if state.is_active:
                     state.is_active = False
                     db.session.commit()
-                    add_log("🛑 CIRCUIT BREAKER TRIGGERED!")
-                    send_bale_notification("🤖 [ربات معامله‌گر]\n🛑 ترمز اضطراری! ضرر روزانه به حد مجاز رسید.")
+                    add_log("CIRCUIT BREAKER TRIGGERED!")
+                    send_bale_notification("ربات معامله‌گر: ترمز اضطراری فعال شد! ضرر روزانه به حد مجاز رسید.")
             
             if state and state.is_active:
                 try:
@@ -283,7 +288,7 @@ def bot_logic_loop():
                                     state.take_profit = current_price + (atr * 3)
                                     state.position_size = size
                                     db.session.commit()
-                                    msg = f"🤖 [ربات معامله‌گر]\n🚀 LONG {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f}\nحجم: {size}"
+                                    msg = f"ربات معامله‌گر: LONG {current_symbol} باز شد! ورود: {current_price:.2f} SL: {sl_price:.2f} حجم: {size}"
                                     add_log(f"LONG Opened on {current_symbol}.")
                                     send_bale_notification(msg)
                             
@@ -303,28 +308,28 @@ def bot_logic_loop():
                                     state.take_profit = current_price - (atr * 3)
                                     state.position_size = size
                                     db.session.commit()
-                                    msg = f"🤖 [ربات معامله‌گر]\n🔻 SHORT {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f}\nحجم: {size}"
+                                    msg = f"ربات معامله‌گر: SHORT {current_symbol} باز شد! ورود: {current_price:.2f} SL: {sl_price:.2f} حجم: {size}"
                                     add_log(f"SHORT Opened on {current_symbol}.")
                                     send_bale_notification(msg)
 
                             elif state.in_position:
                                 if (state.position_type == "long" and current_price <= state.stop_loss) or \
                                    (state.position_type == "short" and current_price >= state.stop_loss):
-                                    add_log("🛑 STOP LOSS HIT!")
-                                    send_bale_notification("🤖 [ربات معامله‌گر]\n🛑 حد ضرر فعال شد.")
+                                    add_log("STOP LOSS HIT!")
+                                    send_bale_notification("ربات معامله‌گر: حد ضرر فعال شد.")
                                     state.in_position = False
                                     state.daily_pnl_percent -= 2.0 
                                     db.session.commit()
                                 
                                 elif (state.position_type == "long" and current_price >= state.take_profit) or \
                                      (state.position_type == "short" and current_price <= state.take_profit):
-                                    add_log("💰 TAKE PROFIT HIT!")
-                                    send_bale_notification("🤖 [ربات معامله‌گر]\n💰 حد سود فعال شد.")
+                                    add_log("TAKE PROFIT HIT!")
+                                    send_bale_notification("ربات معامله‌گر: حد سود فعال شد.")
                                     state.in_position = False
                                     state.daily_pnl_percent += 4.0 
                                     db.session.commit()
                             else:
-                                add_log(f"Analyzing {current_symbol}... Price: ${current_price:,.2f}")
+                                add_log(f"Analyzing {current_symbol}... Price: {current_price:.2f}")
                 except Exception as e:
                     add_log(f"Loop Error: {e}")
         time.sleep(15)
@@ -343,7 +348,7 @@ def pump_dump_auto_loop():
                 if item['score'] >= 85:
                     sym = item['symbol']
                     if sym not in last_alerts or (current_time - last_alerts[sym] > 3600):
-                        msg = f"🚨 [رادار پامپ/دامپ]\nسیگنال {item['status']} برای {sym}!\nقیمت: ${item['price']:,.4f}\nRSI: {item['rsi']} | فشردگی: {item['bb_width']}%\nاحتمال: {item['score']}%"
+                        msg = f"رادار پامپ/دامپ: سیگنال {item['status']} برای {sym}! قیمت: {item['price']:.4f} احتمال: {item['score']}%"
                         send_bale_notification(msg)
                         last_alerts[sym] = current_time 
                         
@@ -394,7 +399,7 @@ def set_symbol():
     new_symbol = data.get('symbol')
     if new_symbol:
         state.active_symbol = new_symbol
-        state.logs = f"[System] Switched to {new_symbol}."
+        state.logs = f"Switched to {new_symbol}."
         db.session.commit()
         return jsonify({"status": "success", "symbol": new_symbol})
     return jsonify({"status": "error", "message": "ارز نامعتبر است."}), 400
@@ -405,7 +410,7 @@ def close_position():
     if state.in_position:
         state.in_position = False
         db.session.commit()
-        add_log("🚨 Panic Close Executed.")
+        add_log("Panic Close Executed.")
         return jsonify({"status": "success", "message": "Position closed."})
     return jsonify({"status": "error", "message": "No open position."})
 
@@ -440,7 +445,6 @@ def analyze_chart():
                 return jsonify({"analysis": response.text})
             except Exception as e: 
                 gemini_err = str(e)
-                print(f"Gemini failed: {gemini_err}")
             
         if GROQ_API_KEY:
             try:
@@ -452,11 +456,9 @@ def analyze_chart():
                 return jsonify({"analysis": response.choices[0].message.content})
             except Exception as e: 
                 groq_err = str(e)
-                print(f"Groq failed: {groq_err}")
             
-        # ⚠️ این خط کاملاً ساده‌سازی شد تا هیچ‌وقت موقع کپی پیست خراب نشود
-        error_message = "AI Services Unavailable. Gemini Error: " + gemini_err[:50] + " | Groq Error: " + groq_err[:50]
-        return jsonify({"error": error_message}), 500
+        error_msg = "AI Failed. Gemini: " + gemini_err[:30] + " | Groq: " + groq_err[:30]
+        return jsonify({"error": error_msg}), 500
         
     except Exception as e:
         return jsonify({"error": "Server Error: " + str(e)}), 500
