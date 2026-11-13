@@ -436,32 +436,23 @@ def analyze_chart():
         gemini_err = ""
         groq_err = ""
 
+        # استفاده از مدل‌های جدید گوگل
         if GEMINI_API_KEY:
             try:
                 response = gemini_client.models.generate_content(
-                    model='gemini-1.5-flash-latest', 
+                    model='gemini-2.5-flash', 
                     contents=[prompt, img]
                 )
                 return jsonify({"analysis": response.text})
             except Exception as e: 
                 gemini_err = str(e)
             
+        # استفاده از مدل جدید Groq
         if GROQ_API_KEY:
             try:
                 response = groq_client.chat.completions.create(
-                    model="llama-3.2-11b-vision-preview", 
+                    model="meta-llama/llama-4-scout-17b-16e-instruct", 
                     messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64_image}}]}],
                     temperature=0.5, max_tokens=1000
                 )
-                return jsonify({"analysis": response.choices[0].message.content})
-            except Exception as e: 
-                groq_err = str(e)
-            
-        error_msg = "AI Failed. Gemini: " + gemini_err[:30] + " | Groq: " + groq_err[:30]
-        return jsonify({"error": error_msg}), 500
-        
-    except Exception as e:
-        return jsonify({"error": "Server Error: " + str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+                return jsonify({"analysis": response.choices[
