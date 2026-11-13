@@ -31,9 +31,12 @@ MAX_SPREAD_PERCENT = 0.5
 DAILY_DRAWDOWN_LIMIT = -3.0 
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
-if GEMINI_API_KEY: gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+if GEMINI_API_KEY: 
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '').strip()
-if GROQ_API_KEY: groq_client = groq.Groq(api_key=GROQ_API_KEY)
+if GROQ_API_KEY: 
+    groq_client = groq.Groq(api_key=GROQ_API_KEY)
 
 BALE_BOT_TOKEN = os.environ.get('BALE_BOT_TOKEN', '')
 BALE_CHAT_ID = os.environ.get('BALE_CHAT_ID', '')
@@ -41,7 +44,8 @@ NOBITEX_API_TOKEN = os.environ.get('NOBITEX_API_TOKEN', '')
 
 # ================= دیتابیس =================
 db_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
-if db_url.startswith("postgres://"): db_url = db_url.replace("postgres://", "postgresql://", 1)
+if db_url.startswith("postgres://"): 
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
@@ -85,7 +89,6 @@ def send_bale_notification(message):
     except Exception as e:
         print(f"Bale Error: {e}")
 
-# تابع دریافت امن داده‌ها با مدیریت خطای 429
 def safe_get_request(url, headers=None, retries=3):
     for attempt in range(retries):
         try:
@@ -414,6 +417,7 @@ def api_scan_pump_dump():
 def analyze_chart():
     if request.method == 'OPTIONS': return jsonify({"status": "ok"}), 200
     if 'image' not in request.files: return jsonify({"error": "عکسی ارسال نشده است."}), 400
+    
     try:
         file = request.files['image']
         img = PIL.Image.open(io.BytesIO(file.read()))
@@ -450,4 +454,4 @@ def analyze_chart():
                 groq_err = str(e)
                 print(f"Groq failed: {groq_err}")
             
-        retu
+        return jsonify({"error":
