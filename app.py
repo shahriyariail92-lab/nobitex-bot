@@ -68,6 +68,16 @@ class BotState(db.Model):
     last_reset_date = db.Column(db.String(20), default="") 
     logs = db.Column(db.Text, default="[System] Database initialized.")
 
+# 🆕 جدول جدید برای تاریخچه معاملات ربات
+class TradeHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    symbol = db.Column(db.String(20))
+    trade_type = db.Column(db.String(10)) # long or short
+    entry_price = db.Column(db.Float)
+    exit_price = db.Column(db.Float)
+    pnl_percent = db.Column(db.Float)
+    date = db.Column(db.String(30))
+
 with app.app_context():
     db.create_all()
     if not BotState.query.first():
@@ -312,20 +322,31 @@ def bot_logic_loop():
                                     send_bale_notification(msg)
 
                             elif state.in_position:
+                                # 🆕 ثبت خودکار معامله در دیتابیس هنگام برخورد با حد ضرر یا حد سود
                                 if (state.position_type == "long" and current_price <= state.stop_loss) or \
                                    (state.position_type == "short" and current_price >= state.stop_loss):
+                                    
+                                    pnl = ((current_price - state.entry_price) / state.entry_price) * 100 if state.position_type == "long" else ((state.entry_price - current_price) / state.entry_price) * 100
+                                    new_trade = TradeHistory(symbol=current_symbol, trade_type=state.position_type, entry_price=state.entry_price, exit_price=current_price, pnl_percent=pnl, date=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"))
+                                    db.session.add(new_trade)
+                                    
                                     add_log("STOP LOSS HIT!")
-                                    send_bale_notification("ربات معامله‌گر: حد ضرر فعال شد.")
+                                    send_bale_notification(f"ربات معامله‌گر: حد ضرر فعال شد. (PnL: {pnl:.2f}%)")
                                     state.in_position = False
-                                    state.daily_pnl_percent -= 2.0 
+                                    state.daily_pnl_percent += pnl 
                                     db.session.commit()
                                 
                                 elif (state.position_type == "long" and current_price >= state.take_profit) or \
                                      (state.position_type == "short" and current_price <= state.take_profit):
+                                    
+                                    pnl = ((current_price - state.entry_price) / state.entry_price) * 100 if state.position_type == "long" else ((state.entry_price - current_price) / state.entry_price) * 100
+                                    new_trade = TradeHistory(symbol=current_symbol, trade_type=state.position_type, entry_price=state.entry_price, exit_price=current_price, pnl_percent=pnl, date=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"))
+                                    db.session.add(new_trade)
+                                    
                                     add_log("TAKE PROFIT HIT!")
-                                    send_bale_notification("ربات معامله‌گر: حد سود فعال شد.")
+                                    send_bale_notification(f"ربات معامله‌گر: حد سود فعال شد. (PnL: {pnl:.2f}%)")
                                     state.in_position = False
-                                    state.daily_pnl_percent += 4.0 
+                                    state.daily_pnl_percent += pnl 
                                     db.session.commit()
                             else:
                                 add_log(f"Analyzing {current_symbol}... Price: {current_price:.2f}")
@@ -379,6 +400,22 @@ def get_status():
         "logs": state.logs.split('\n')
     })
 
+# 🆕 API دریافت تاریخچه معاملات ربات
+@app.route('/journal', methods=['GET'])
+def get_journal():
+    trades = TradeHistory.query.order_by(TradeHistory.id.desc()).all()
+    result = []
+    for t in trades:
+        result.append({
+            "symbol": t.symbol,
+            "type": t.trade_type,
+            "entry": t.entry_price,
+            "exit": t.exit_price,
+            "pnl": round(t.pnl_percent, 2),
+            "date": t.date
+        })
+    return jsonify(result)
+
 @app.route('/toggle', methods=['POST'])
 def toggle_bot():
     state = BotState.query.first()
@@ -408,70 +445,4 @@ def close_position():
     state = BotState.query.first()
     if state.in_position:
         state.in_position = False
-        db.session.commit()
-        add_log("Panic Close Executed.")
-        return jsonify({"status": "success", "message": "Position closed."})
-    return jsonify({"status": "error", "message": "No open position."})
-
-@app.route('/scan_pump_dump', methods=['GET'])
-def api_scan_pump_dump():
-    return jsonify(perform_pump_dump_scan())
-
-@app.route('/analyze', methods=['POST', 'OPTIONS'])
-def analyze_chart():
-    if request.method == 'OPTIONS': return jsonify({"status": "ok"}), 200
-    if 'image' not in request.files: return jsonify({"error": "عکسی ارسال نشده است."}), 400
-    
-    try:
-        file = request.files['image']
-        img = PIL.Image.open(io.BytesIO(file.read()))
-        img.thumbnail((800, 800))
-        buffered = io.BytesIO()
-        img.convert('RGB').save(buffered, format="JPEG")
-        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
-        
-        prompt = "You are a technical analyst. Analyze the chart image and provide a comprehensive analysis in Persian (with new lines for each section): 1. Overall Trend 2. Support & Resistance 3. Indicators 4. Patterns 5. Trading Plan. Keep it concise."
-        
-        gemini_err = ""
-        groq_err = ""
-        ai_text = ""
-
-        # 1. تلاش با Gemini
-        if GEMINI_API_KEY:
-            try:
-                response = gemini_client.models.generate_content(
-                    model='gemini-2.5-flash', 
-                    contents=[prompt, img]
-                )
-                ai_text = response.text
-            except Exception as e: 
-                gemini_err = str(e)
-            
-        # 2. تلاش با Groq (اگر گوگل جواب نداد)
-        if not ai_text and GROQ_API_KEY:
-            try:
-                response = groq_client.chat.completions.create(
-                    model="meta-llama/llama-4-scout-17b-16e-instruct", 
-                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64_image}}]}],
-                    temperature=0.5, max_tokens=1000
-                )
-                
-                # 🆕 خطوط طولانی به چند خط ساده تقسیم شدند
-                choices = response.choices
-                message = choices[0].message
-                ai_text = message.content
-                
-            except Exception as e: 
-                groq_err = str(e)
-            
-        if ai_text:
-            return jsonify({"analysis": ai_text})
-        else:
-            error_msg = "AI Failed. Gemini: " + gemini_err[:30] + " | Groq: " + groq_err[:30]
-            return jsonify({"error": error_msg}), 500
-        
-    except Exception as e:
-        return jsonify({"error": "Server Error: " + str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+        db.session.co
