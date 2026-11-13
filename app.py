@@ -426,7 +426,7 @@ def analyze_chart():
         img.convert('RGB').save(buffered, format="JPEG")
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
         
-        prompt = "شما یک تحلیلگر تکنیکال هستید. تصویر چارت را بررسی کنید و تحلیل جامع به فارسی (با خط جدید برای هر بخش) بدهید: 1. روند کلی 2. حمایت و مقاومت 3. اندیکاتورها 4. الگوها 5. پیشنهاد معاملاتی (ورود، سود، ضرر). کوتاه و مفید باشد."
+        prompt = "You are a technical analyst. Analyze the chart image and provide a comprehensive analysis in Persian (with new lines for each section): 1. Overall Trend 2. Support & Resistance 3. Indicators 4. Patterns 5. Trading Plan. Keep it concise."
         
         gemini_err = ""
         groq_err = ""
@@ -446,7 +446,7 @@ def analyze_chart():
             try:
                 response = groq_client.chat.completions.create(
                     model="llama-3.2-11b-vision-preview", 
-                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
+                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64_image}}]}],
                     temperature=0.5, max_tokens=1000
                 )
                 return jsonify({"analysis": response.choices[0].message.content})
@@ -454,4 +454,4 @@ def analyze_chart():
                 groq_err = str(e)
                 print(f"Groq failed: {groq_err}")
             
-        err_msg = f"گوگل: {gemin
+        # ⚠️ این
