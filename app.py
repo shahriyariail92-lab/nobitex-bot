@@ -11,6 +11,8 @@ import groq
 import PIL.Image
 import io
 import base64
+import math
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -55,6 +57,7 @@ class BotState(db.Model):
     position_size = db.Column(db.Float, default=0.0)
     active_symbol = db.Column(db.String(20), default="BTCUSDT") 
     daily_pnl_percent = db.Column(db.Float, default=0.0) 
+    last_reset_date = db.Column(db.String(20), default="") # 🆕 برای ریست روزانه
     logs = db.Column(db.Text, default="[System] Database initialized.")
 
 with app.app_context():
@@ -81,29 +84,41 @@ def send_bale_notification(message):
         requests.post(url, json={"chat_id": BALE_CHAT_ID, "text": message}, timeout=10)
     except: pass
 
+# 🆕 تابع دریافت امن داده‌ها با مدیریت خطای 429 (Rate Limit)
+def safe_get_request(url, headers=None, retries=3):
+    for attempt in range(retries):
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 429:
+                time.sleep(5) # صبر میکنیم و دوباره تلاش میکنیم
+                continue
+            return res
+        except Exception as e:
+            time.sleep(2)
+    return None
+
 def get_account_balance():
     if TEST_MODE or not NOBITEX_API_TOKEN: return 1000.0
     url = "https://apiv2.nobitex.ir/users/wallets/list"
     headers = {"Authorization": f"Token {NOBITEX_API_TOKEN}"}
-    try:
-        res = requests.get(url, headers=headers, timeout=10).json()
-        if res.get('status') == 'ok':
-            for wallet in res['wallets']:
+    res = safe_get_request(url, headers=headers)
+    if res:
+        data = res.json()
+        if data.get('status') == 'ok':
+            for wallet in data['wallets']:
                 if wallet['currency'] == 'usdt':
                     return float(wallet['balance'])
-    except: pass
     return 0.0
 
 def get_ohlc_data(symbol, resolution=60, limit=50):
     end_time = int(time.time())
     start_time = end_time - (limit * resolution * 60)
     url = f"https://apiv2.nobitex.ir/market/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
-    try:
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+    res = safe_get_request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    if res:
         data = res.json()
         if data.get('s') == 'ok':
             return {"open": data['o'], "high": data['h'], "low": data['l'], "close": data['c'], "volume": data['v']}
-    except: pass
     return None
 
 # ================= اندیکاتورها =================
@@ -141,7 +156,7 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# ================= هسته اسکنر پامپ و دامپ =================
+# ================= هسته اسکنر پامپ و دامپ (استفاده از کندل بسته شده) =================
 def perform_pump_dump_scan():
     symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
     results = []
@@ -149,11 +164,11 @@ def perform_pump_dump_scan():
     for sym in symbols:
         try:
             ohlc = get_ohlc_data(symbol=sym, resolution=15, limit=30)
-            if not ohlc: continue
+            if not ohlc or len(ohlc['close']) < 25: continue
             
-            closes = ohlc['close']
-            volumes = ohlc['volume']
-            if len(closes) < 20 or len(volumes) < 20: continue
+            # 🆕 استفاده از کندل -2 (کندل قبلی که کاملاً بسته شده) برای جلوگیری از سیگنال کاذب
+            closes = ohlc['close'][:-1] 
+            volumes = ohlc['volume'][:-1]
             
             current_price = closes[-1]
             current_vol = volumes[-1]
@@ -212,6 +227,14 @@ def bot_logic_loop():
         with app.app_context():
             state = BotState.query.first()
             
+            # 🆕 ریست روزانه ضرر (Daily Reset)
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if state.last_reset_date != today_str:
+                state.daily_pnl_percent = 0.0
+                state.last_reset_date = today_str
+                db.session.commit()
+                add_log("🔄 Daily PnL Reset to 0%.")
+            
             if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT:
                 if state.is_active:
                     state.is_active = False
@@ -239,7 +262,10 @@ def bot_logic_loop():
                                 balance = get_account_balance()
                                 sl_price = current_price - (atr * 1.5)
                                 price_diff = abs(current_price - sl_price)
-                                size = round((balance * RISK_PER_TRADE_PERCENT) / price_diff, 6) if price_diff > 0 else 0
+                                
+                                # 🆕 گرد کردن حجم به ۶ رقم اعشار (Precision Fix)
+                                raw_size = (balance * RISK_PER_TRADE_PERCENT) / price_diff if price_diff > 0 else 0
+                                size = math.floor(raw_size * 1e6) / 1e6 
                                 
                                 if size > 0:
                                     state.in_position = True
@@ -249,7 +275,7 @@ def bot_logic_loop():
                                     state.take_profit = current_price + (atr * 3)
                                     state.position_size = size
                                     db.session.commit()
-                                    msg = f"🤖 [ربات معامله‌گر]\n🚀 LONG {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f}"
+                                    msg = f"🤖 [ربات معامله‌گر]\n🚀 LONG {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f}\nحجم: {size}"
                                     add_log(f"LONG Opened on {current_symbol}.")
                                     send_bale_notification(msg)
                             
@@ -257,7 +283,9 @@ def bot_logic_loop():
                                 balance = get_account_balance()
                                 sl_price = current_price + (atr * 1.5)
                                 price_diff = abs(sl_price - current_price)
-                                size = round((balance * RISK_PER_TRADE_PERCENT) / price_diff, 6) if price_diff > 0 else 0
+                                
+                                raw_size = (balance * RISK_PER_TRADE_PERCENT) / price_diff if price_diff > 0 else 0
+                                size = math.floor(raw_size * 1e6) / 1e6
                                 
                                 if size > 0:
                                     state.in_position = True
@@ -267,7 +295,7 @@ def bot_logic_loop():
                                     state.take_profit = current_price - (atr * 3)
                                     state.position_size = size
                                     db.session.commit()
-                                    msg = f"🤖 [ربات معامله‌گر]\n🔻 SHORT {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f}"
+                                    msg = f"🤖 [ربات معامله‌گر]\n🔻 SHORT {current_symbol} باز شد!\nورود: ${current_price:,.2f}\nSL: ${sl_price:,.2f}\nحجم: {size}"
                                     add_log(f"SHORT Opened on {current_symbol}.")
                                     send_bale_notification(msg)
 
@@ -413,14 +441,4 @@ def analyze_chart():
                     temperature=0.5, max_tokens=1000
                 )
                 return jsonify({"analysis": response.choices[0].message.content})
-            except Exception as e: 
-                groq_err = str(e)
-                print(f"Groq failed: {groq_err}")
-            
-        return jsonify({"error": f"گوگل: {gemini_err[:50]}... | Groq: {groq_err[:50]}..."}), 500
-        
-    except Exception as e:
-        return jsonify({"error": f"خطای سرور: {str(e)}"}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+            except Exc
