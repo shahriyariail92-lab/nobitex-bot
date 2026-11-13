@@ -454,4 +454,4 @@ def analyze_chart():
                 groq_err = str(e)
                 print(f"Groq failed: {groq_err}")
             
-        return jsonify({"error":
+        err_msg = f"گوگل: {gemin
