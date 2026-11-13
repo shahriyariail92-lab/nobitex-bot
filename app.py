@@ -45,7 +45,6 @@ NOBITEX_API_TOKEN = os.environ.get('NOBITEX_API_TOKEN', '')
 # ================= تنظیمات دیتابیس =================
 db_url_str = os.environ.get('DATABASE_URL', 'sqlite:///local.db').strip()
 
-# اصلاح لینک برای استفاده از psycopg2 در SQLAlchemy
 if db_url_str.startswith("postgres://"):
     db_url_str = db_url_str.replace("postgres://", "postgresql+psycopg2://", 1)
 elif db_url_str.startswith("postgresql://") and not db_url_str.startswith("postgresql+psycopg2://"):
@@ -435,24 +434,44 @@ def analyze_chart():
         
         gemini_err = ""
         groq_err = ""
+        ai_text = ""
 
-        # استفاده از مدل‌های جدید گوگل
+        # 1. تلاش با Gemini
         if GEMINI_API_KEY:
             try:
                 response = gemini_client.models.generate_content(
                     model='gemini-2.5-flash', 
                     contents=[prompt, img]
                 )
-                return jsonify({"analysis": response.text})
+                ai_text = response.text
             except Exception as e: 
                 gemini_err = str(e)
             
-        # استفاده از مدل جدید Groq
-        if GROQ_API_KEY:
+        # 2. تلاش با Groq (اگر گوگل جواب نداد)
+        if not ai_text and GROQ_API_KEY:
             try:
                 response = groq_client.chat.completions.create(
                     model="meta-llama/llama-4-scout-17b-16e-instruct", 
                     messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64_image}}]}],
                     temperature=0.5, max_tokens=1000
                 )
-                return jsonify({"analysis": response.choices[
+                
+                # 🆕 خطوط طولانی به چند خط ساده تقسیم شدند
+                choices = response.choices
+                message = choices[0].message
+                ai_text = message.content
+                
+            except Exception as e: 
+                groq_err = str(e)
+            
+        if ai_text:
+            return jsonify({"analysis": ai_text})
+        else:
+            error_msg = "AI Failed. Gemini: " + gemini_err[:30] + " | Groq: " + groq_err[:30]
+            return jsonify({"error": error_msg}), 500
+        
+    except Exception as e:
+        return jsonify({"error": "Server Error: " + str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
