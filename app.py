@@ -454,4 +454,12 @@ def analyze_chart():
                 groq_err = str(e)
                 print(f"Groq failed: {groq_err}")
             
-        # ⚠️ این
+        # ⚠️ این خط کاملاً ساده‌سازی شد تا هیچ‌وقت موقع کپی پیست خراب نشود
+        error_message = "AI Services Unavailable. Gemini Error: " + gemini_err[:50] + " | Groq Error: " + groq_err[:50]
+        return jsonify({"error": error_message}), 500
+        
+    except Exception as e:
+        return jsonify({"error": "Server Error: " + str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
