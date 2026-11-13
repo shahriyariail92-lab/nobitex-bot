@@ -1,9 +1,9 @@
 Flask
 Flask-Cors
 Flask-SQLAlchemy
-psycopg2-binary
 requests
 gunicorn
 google-genai
 Pillow
 groq
+psycopg2-binary
