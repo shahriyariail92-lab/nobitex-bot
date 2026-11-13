@@ -57,7 +57,7 @@ class BotState(db.Model):
     position_size = db.Column(db.Float, default=0.0)
     active_symbol = db.Column(db.String(20), default="BTCUSDT") 
     daily_pnl_percent = db.Column(db.Float, default=0.0) 
-    last_reset_date = db.Column(db.String(20), default="") # 🆕 برای ریست روزانه
+    last_reset_date = db.Column(db.String(20), default="") 
     logs = db.Column(db.Text, default="[System] Database initialized.")
 
 with app.app_context():
@@ -82,15 +82,16 @@ def send_bale_notification(message):
     try:
         url = f"https://tapi.bale.ai/bot{BALE_BOT_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": BALE_CHAT_ID, "text": message}, timeout=10)
-    except: pass
+    except Exception as e:
+        print(f"Bale Error: {e}")
 
-# 🆕 تابع دریافت امن داده‌ها با مدیریت خطای 429 (Rate Limit)
+# تابع دریافت امن داده‌ها با مدیریت خطای 429
 def safe_get_request(url, headers=None, retries=3):
     for attempt in range(retries):
         try:
             res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 429:
-                time.sleep(5) # صبر میکنیم و دوباره تلاش میکنیم
+                time.sleep(5) 
                 continue
             return res
         except Exception as e:
@@ -103,11 +104,14 @@ def get_account_balance():
     headers = {"Authorization": f"Token {NOBITEX_API_TOKEN}"}
     res = safe_get_request(url, headers=headers)
     if res:
-        data = res.json()
-        if data.get('status') == 'ok':
-            for wallet in data['wallets']:
-                if wallet['currency'] == 'usdt':
-                    return float(wallet['balance'])
+        try:
+            data = res.json()
+            if data.get('status') == 'ok':
+                for wallet in data['wallets']:
+                    if wallet['currency'] == 'usdt':
+                        return float(wallet['balance'])
+        except Exception:
+            pass
     return 0.0
 
 def get_ohlc_data(symbol, resolution=60, limit=50):
@@ -116,9 +120,12 @@ def get_ohlc_data(symbol, resolution=60, limit=50):
     url = f"https://apiv2.nobitex.ir/market/udf/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
     res = safe_get_request(url, headers={'User-Agent': 'Mozilla/5.0'})
     if res:
-        data = res.json()
-        if data.get('s') == 'ok':
-            return {"open": data['o'], "high": data['h'], "low": data['l'], "close": data['c'], "volume": data['v']}
+        try:
+            data = res.json()
+            if data.get('s') == 'ok':
+                return {"open": data['o'], "high": data['h'], "low": data['l'], "close": data['c'], "volume": data['v']}
+        except Exception:
+            pass
     return None
 
 # ================= اندیکاتورها =================
@@ -126,7 +133,8 @@ def calculate_ema(prices, period):
     if len(prices) < period: return None
     multiplier = 2 / (period + 1)
     ema = sum(prices[:period]) / period
-    for price in prices[period:]: ema = (price - ema) * multiplier + ema
+    for price in prices[period:]: 
+        ema = (price - ema) * multiplier + ema
     return ema
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3):
@@ -156,7 +164,7 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# ================= هسته اسکنر پامپ و دامپ (استفاده از کندل بسته شده) =================
+# ================= هسته اسکنر پامپ و دامپ =================
 def perform_pump_dump_scan():
     symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
     results = []
@@ -166,7 +174,6 @@ def perform_pump_dump_scan():
             ohlc = get_ohlc_data(symbol=sym, resolution=15, limit=30)
             if not ohlc or len(ohlc['close']) < 25: continue
             
-            # 🆕 استفاده از کندل -2 (کندل قبلی که کاملاً بسته شده) برای جلوگیری از سیگنال کاذب
             closes = ohlc['close'][:-1] 
             volumes = ohlc['volume'][:-1]
             
@@ -227,7 +234,6 @@ def bot_logic_loop():
         with app.app_context():
             state = BotState.query.first()
             
-            # 🆕 ریست روزانه ضرر (Daily Reset)
             today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if state.last_reset_date != today_str:
                 state.daily_pnl_percent = 0.0
@@ -263,7 +269,6 @@ def bot_logic_loop():
                                 sl_price = current_price - (atr * 1.5)
                                 price_diff = abs(current_price - sl_price)
                                 
-                                # 🆕 گرد کردن حجم به ۶ رقم اعشار (Precision Fix)
                                 raw_size = (balance * RISK_PER_TRADE_PERCENT) / price_diff if price_diff > 0 else 0
                                 size = math.floor(raw_size * 1e6) / 1e6 
                                 
@@ -441,4 +446,8 @@ def analyze_chart():
                     temperature=0.5, max_tokens=1000
                 )
                 return jsonify({"analysis": response.choices[0].message.content})
-            except Exc
+            except Exception as e: 
+                groq_err = str(e)
+                print(f"Groq failed: {groq_err}")
+            
+        retu
