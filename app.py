@@ -407,7 +407,20 @@ def pump_dump_auto_loop():
             current_time = time.time()
             
             for item in results:
-                if item['score'] >= 95: # 🆕 فقط سیگنال‌های بالای ۹۵
+                if item['score'] >= 95: 
                     sym = item['symbol']
-                    if sym not in last_alerts or (current_time - last_alerts[sym] > 14400): # 🆕 هر ۴ ساعت یکبار
-                        msg = f"رادار پامپ/دامپ: سیگنال {item['status']} برای {sym
+                    if sym not in last_alerts or (current_time - last_alerts[sym] > 14400): 
+                        # 🆕 خطوط طولانی به چند خط ساده تقسیم شدند تا کپی‌پیست خراب نشود
+                        status_text = str(item['status'])
+                        price_text = str(round(item['price'], 4))
+                        score_text = str(item['score'])
+                        
+                        msg = "رادار پامپ/دامپ: سیگنال " + status_text + " برای " + sym + " | قیمت: " + price_text + " | احتمال: " + score_text + "%"
+                        
+                        send_bale_notification(msg)
+                        last_alerts[sym] = current_time 
+                        
+        except Exception as e:
+            print(f"Pump Dump Loop Error: {e}")
+            
+        time.sleep(300) 
