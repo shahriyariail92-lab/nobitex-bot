@@ -68,11 +68,10 @@ class BotState(db.Model):
     last_reset_date = db.Column(db.String(20), default="") 
     logs = db.Column(db.Text, default="[System] Database initialized.")
 
-# 🆕 جدول جدید برای تاریخچه معاملات ربات
 class TradeHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     symbol = db.Column(db.String(20))
-    trade_type = db.Column(db.String(10)) # long or short
+    trade_type = db.Column(db.String(10)) 
     entry_price = db.Column(db.Float)
     exit_price = db.Column(db.Float)
     pnl_percent = db.Column(db.Float)
@@ -181,7 +180,7 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# ================= هسته اسکنر پامپ و دامپ =================
+# ================= هسته اسکنر پامپ و دامپ (با فیلتر روند ۱ ساعته) =================
 def perform_pump_dump_scan():
     symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
     results = []
@@ -193,8 +192,10 @@ def perform_pump_dump_scan():
             
             closes = ohlc['close'][:-1] 
             volumes = ohlc['volume'][:-1]
+            opens = ohlc['open'][:-1]
             
             current_price = closes[-1]
+            current_open = opens[-1]
             current_vol = volumes[-1]
             avg_vol = sum(volumes[-20:]) / 20
             vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1
@@ -216,6 +217,12 @@ def perform_pump_dump_scan():
             avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 0
             rsi = 100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss > 0 else 100
             
+            # دریافت روند ۱ ساعته برای تاییدیه
+            ohlc_1h = get_ohlc_data(symbol=sym, resolution=60, limit=30)
+            ema9_1h = calculate_ema(ohlc_1h['close'], 9) if ohlc_1h else None
+            ema21_1h = calculate_ema(ohlc_1h['close'], 21) if ohlc_1h else None
+            is_1h_downtrend = True if (ema9_1h and ema21_1h and ema9_1h < ema21_1h) else False
+            
             status = "عادی"
             color = "#64748B"
             score = 0
@@ -227,14 +234,20 @@ def perform_pump_dump_scan():
                 if score < 50: score = 50
 
             if vol_ratio > 2.0: 
-                if rsi > 65:
+                if rsi > 65 and current_price < current_open:
                     status = "هشدار دامپ (فروش نهنگ)"
                     color = "#EF4444"
                     score = min(100, int(70 + (vol_ratio * 5) + (rsi - 65)))
-                elif rsi < 35:
+                
+                elif rsi < 35 and current_price > current_open and not is_1h_downtrend:
                     status = "احتمال پامپ (خرید نهنگ)"
                     color = "#10B981"
                     score = min(100, int(70 + (vol_ratio * 5) + (35 - rsi)))
+                
+                elif rsi < 35 and (current_price < current_open or is_1h_downtrend):
+                    status = "ادامه روند نزولی (مراقب باشید)"
+                    color = "#F97316" 
+                    score = 50
 
             results.append({
                 "symbol": sym.replace("USDT", ""), "price": current_price, "vol_ratio": round(vol_ratio, 2),
@@ -322,7 +335,6 @@ def bot_logic_loop():
                                     send_bale_notification(msg)
 
                             elif state.in_position:
-                                # 🆕 ثبت خودکار معامله در دیتابیس هنگام برخورد با حد ضرر یا حد سود
                                 if (state.position_type == "long" and current_price <= state.stop_loss) or \
                                    (state.position_type == "short" and current_price >= state.stop_loss):
                                     
@@ -365,9 +377,9 @@ def pump_dump_auto_loop():
             current_time = time.time()
             
             for item in results:
-                if item['score'] >= 85:
+                if item['score'] >= 95:
                     sym = item['symbol']
-                    if sym not in last_alerts or (current_time - last_alerts[sym] > 3600):
+                    if sym not in last_alerts or (current_time - last_alerts[sym] > 14400):
                         msg = f"رادار پامپ/دامپ: سیگنال {item['status']} برای {sym}! قیمت: {item['price']:.4f} احتمال: {item['score']}%"
                         send_bale_notification(msg)
                         last_alerts[sym] = current_time 
@@ -400,7 +412,6 @@ def get_status():
         "logs": state.logs.split('\n')
     })
 
-# 🆕 API دریافت تاریخچه معاملات ربات
 @app.route('/journal', methods=['GET'])
 def get_journal():
     trades = TradeHistory.query.order_by(TradeHistory.id.desc()).all()
@@ -429,20 +440,4 @@ def toggle_bot():
 @app.route('/set_symbol', methods=['POST'])
 def set_symbol():
     state = BotState.query.first()
-    if state.in_position:
-        return jsonify({"status": "error", "message": "شما پوزیشن باز دارید!"}), 400
-    data = request.json
-    new_symbol = data.get('symbol')
-    if new_symbol:
-        state.active_symbol = new_symbol
-        state.logs = f"Switched to {new_symbol}."
-        db.session.commit()
-        return jsonify({"status": "success", "symbol": new_symbol})
-    return jsonify({"status": "error", "message": "ارز نامعتبر است."}), 400
-
-@app.route('/close_position', methods=['POST'])
-def close_position():
-    state = BotState.query.first()
-    if state.in_position:
-        state.in_position = False
-        db.session.co
+    i
