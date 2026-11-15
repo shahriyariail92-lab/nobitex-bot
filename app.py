@@ -217,7 +217,6 @@ def perform_pump_dump_scan():
             avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 0
             rsi = 100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss > 0 else 100
             
-            # دریافت روند ۱ ساعته برای تاییدیه
             ohlc_1h = get_ohlc_data(symbol=sym, resolution=60, limit=30)
             ema9_1h = calculate_ema(ohlc_1h['close'], 9) if ohlc_1h else None
             ema21_1h = calculate_ema(ohlc_1h['close'], 21) if ohlc_1h else None
@@ -258,7 +257,7 @@ def perform_pump_dump_scan():
             
     return results
 
-# ================= ترد ۱: ربات معامله‌گر =================
+# ================= ترد ۱: ربات معامله‌گر (با Trailing Stop) =================
 def bot_logic_loop():
     while True:
         with app.app_context():
@@ -294,6 +293,7 @@ def bot_logic_loop():
                         atr = calculate_atr(ohlc['high'], ohlc['low'], close_prices, 14)
                         
                         if ema9 and ema21 and supertrend and macd is not None and atr:
+                            # باز کردن پوزیشن جدید
                             if not state.in_position and ema9 > ema21 and supertrend == 1 and macd > 0:
                                 balance = get_account_balance()
                                 sl_price = current_price - (atr * 1.5)
@@ -334,7 +334,37 @@ def bot_logic_loop():
                                     add_log(f"SHORT Opened on {current_symbol}.")
                                     send_bale_notification(msg)
 
+                            # مدیریت پوزیشن باز (شامل Trailing Stop)
                             elif state.in_position:
+                                # 🆕 بخش Trailing Stop برای LONG
+                                if state.position_type == "long":
+                                    # 1. حد ضرر روی نقطه ورود (Breakeven) اگر 1.5% سود کردیم
+                                    if current_price > state.entry_price * 1.015 and state.stop_loss < state.entry_price:
+                                        state.stop_loss = state.entry_price
+                                        db.session.commit()
+                                        add_log("Trailing Stop: SL moved to Breakeven (Long)")
+                                    
+                                    # 2. حد ضرر متحرک بر اساس ATR
+                                    new_sl = current_price - (atr * 1.5)
+                                    if new_sl > state.stop_loss and current_price > state.entry_price:
+                                        state.stop_loss = new_sl
+                                        db.session.commit()
+                                        add_log(f"Trailing Stop updated (Long) to {new_sl:.2f}")
+                                
+                                # 🆕 بخش Trailing Stop برای SHORT
+                                elif state.position_type == "short":
+                                    if current_price < state.entry_price * 0.985 and state.stop_loss > state.entry_price:
+                                        state.stop_loss = state.entry_price
+                                        db.session.commit()
+                                        add_log("Trailing Stop: SL moved to Breakeven (Short)")
+                                    
+                                    new_sl = current_price + (atr * 1.5)
+                                    if new_sl < state.stop_loss and current_price < state.entry_price:
+                                        state.stop_loss = new_sl
+                                        db.session.commit()
+                                        add_log(f"Trailing Stop updated (Short) to {new_sl:.2f}")
+
+                                # چک کردن برخورد با حد ضرر یا حد سود
                                 if (state.position_type == "long" and current_price <= state.stop_loss) or \
                                    (state.position_type == "short" and current_price >= state.stop_loss):
                                     
@@ -377,67 +407,7 @@ def pump_dump_auto_loop():
             current_time = time.time()
             
             for item in results:
-                if item['score'] >= 95:
+                if item['score'] >= 95: # 🆕 فقط سیگنال‌های بالای ۹۵
                     sym = item['symbol']
-                    if sym not in last_alerts or (current_time - last_alerts[sym] > 14400):
-                        msg = f"رادار پامپ/دامپ: سیگنال {item['status']} برای {sym}! قیمت: {item['price']:.4f} احتمال: {item['score']}%"
-                        send_bale_notification(msg)
-                        last_alerts[sym] = current_time 
-                        
-        except Exception as e:
-            print(f"Pump Dump Loop Error: {e}")
-            
-        time.sleep(300) 
-
-# ================= اجرای تردها =================
-threads_started = False
-@app.before_request
-def start_background_threads():
-    global threads_started
-    if not threads_started:
-        threading.Thread(target=bot_logic_loop, daemon=True).start()
-        threading.Thread(target=pump_dump_auto_loop, daemon=True).start()
-        threads_started = True
-
-# ================= API Routes =================
-@app.route('/status', methods=['GET'])
-def get_status():
-    state = BotState.query.first()
-    return jsonify({
-        "is_active": state.is_active, "in_position": state.in_position, 
-        "position_type": state.position_type, "entry_price": state.entry_price,
-        "stop_loss": state.stop_loss, "take_profit": state.take_profit,
-        "position_size": state.position_size, "active_symbol": state.active_symbol,
-        "daily_pnl": round(state.daily_pnl_percent, 2),
-        "logs": state.logs.split('\n')
-    })
-
-@app.route('/journal', methods=['GET'])
-def get_journal():
-    trades = TradeHistory.query.order_by(TradeHistory.id.desc()).all()
-    result = []
-    for t in trades:
-        result.append({
-            "symbol": t.symbol,
-            "type": t.trade_type,
-            "entry": t.entry_price,
-            "exit": t.exit_price,
-            "pnl": round(t.pnl_percent, 2),
-            "date": t.date
-        })
-    return jsonify(result)
-
-@app.route('/toggle', methods=['POST'])
-def toggle_bot():
-    state = BotState.query.first()
-    if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT and not state.is_active:
-        return jsonify({"status": "error", "message": "ترمز اضطراری فعال است!"}), 400
-    state.is_active = not state.is_active
-    db.session.commit()
-    add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
-    return jsonify({"status": "success", "is_active": state.is_active})
-
-@app.route('/set_symbol', methods=['POST'])
-def set_symbol():
-    state = BotState.query.first()
-    i
+                    if sym not in last_alerts or (current_time - last_alerts[sym] > 14400): # 🆕 هر ۴ ساعت یکبار
+                        msg = f"رادار پامپ/دامپ: سیگنال {item['status']} برای {sym
