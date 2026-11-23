@@ -29,14 +29,12 @@ TEST_MODE = True
 RISK_PER_TRADE_PERCENT = 0.02
 MAX_SPREAD_PERCENT = 0.5 
 DAILY_DRAWDOWN_LIMIT = -3.0 
+FEE_PERCENT = 0.5 # 🆕 کارمزد رفت و برگشت (۰.۲۵٪ خرید + ۰.۲۵٪ فروش)
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
-if GEMINI_API_KEY: 
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-    
+if GEMINI_API_KEY: gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '').strip()
-if GROQ_API_KEY: 
-    groq_client = groq.Groq(api_key=GROQ_API_KEY)
+if GROQ_API_KEY: groq_client = groq.Groq(api_key=GROQ_API_KEY)
 
 BALE_BOT_TOKEN = os.environ.get('BALE_BOT_TOKEN', '')
 BALE_CHAT_ID = os.environ.get('BALE_CHAT_ID', '')
@@ -44,7 +42,6 @@ NOBITEX_API_TOKEN = os.environ.get('NOBITEX_API_TOKEN', '')
 
 # ================= تنظیمات دیتابیس =================
 db_url_str = os.environ.get('DATABASE_URL', 'sqlite:///local.db').strip()
-
 if db_url_str.startswith("postgres://"):
     db_url_str = db_url_str.replace("postgres://", "postgresql+psycopg2://", 1)
 elif db_url_str.startswith("postgresql://") and not db_url_str.startswith("postgresql+psycopg2://"):
@@ -99,8 +96,7 @@ def send_bale_notification(message):
     try:
         url = f"https://tapi.bale.ai/bot{BALE_BOT_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": BALE_CHAT_ID, "text": message}, timeout=10)
-    except Exception as e:
-        print(f"Bale Error: {e}")
+    except Exception as e: print(f"Bale Error: {e}")
 
 def safe_get_request(url, headers=None, retries=3):
     for attempt in range(retries):
@@ -110,8 +106,7 @@ def safe_get_request(url, headers=None, retries=3):
                 time.sleep(5) 
                 continue
             return res
-        except Exception as e:
-            time.sleep(2)
+        except Exception: time.sleep(2)
     return None
 
 def get_account_balance():
@@ -124,10 +119,8 @@ def get_account_balance():
             data = res.json()
             if data.get('status') == 'ok':
                 for wallet in data['wallets']:
-                    if wallet['currency'] == 'usdt':
-                        return float(wallet['balance'])
-        except Exception:
-            pass
+                    if wallet['currency'] == 'usdt': return float(wallet['balance'])
+        except Exception: pass
     return 0.0
 
 def get_ohlc_data(symbol, resolution=60, limit=50):
@@ -140,8 +133,7 @@ def get_ohlc_data(symbol, resolution=60, limit=50):
             data = res.json()
             if data.get('s') == 'ok':
                 return {"open": data['o'], "high": data['h'], "low": data['l'], "close": data['c'], "volume": data['v']}
-        except Exception:
-            pass
+        except Exception: pass
     return None
 
 # ================= اندیکاتورها =================
@@ -149,8 +141,7 @@ def calculate_ema(prices, period):
     if len(prices) < period: return None
     multiplier = 2 / (period + 1)
     ema = sum(prices[:period]) / period
-    for price in prices[period:]: 
-        ema = (price - ema) * multiplier + ema
+    for price in prices[period:]: ema = (price - ema) * multiplier + ema
     return ema
 
 def calculate_supertrend(high, low, close, period=10, multiplier=3):
@@ -180,7 +171,7 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# ================= هسته اسکنر پامپ و دامپ (با فیلتر روند ۱ ساعته) =================
+# ================= هسته اسکنر پامپ و دامپ =================
 def perform_pump_dump_scan():
     symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
     results = []
@@ -189,17 +180,14 @@ def perform_pump_dump_scan():
         try:
             ohlc = get_ohlc_data(symbol=sym, resolution=15, limit=30)
             if not ohlc or len(ohlc['close']) < 25: continue
-            
             closes = ohlc['close'][:-1] 
             volumes = ohlc['volume'][:-1]
             opens = ohlc['open'][:-1]
-            
             current_price = closes[-1]
             current_open = opens[-1]
             current_vol = volumes[-1]
             avg_vol = sum(volumes[-20:]) / 20
             vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1
-            
             if current_vol == 0: continue
 
             sma20 = sum(closes[-20:]) / 20
@@ -212,7 +200,6 @@ def perform_pump_dump_scan():
                 change = closes[i] - closes[i-1]
                 gains.append(change if change > 0 else 0)
                 losses.append(abs(change) if change < 0 else 0)
-            
             avg_gain = sum(gains[-14:]) / 14 if len(gains) >= 14 else 0
             avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 0
             rsi = 100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss > 0 else 100
@@ -225,44 +212,36 @@ def perform_pump_dump_scan():
             status = "عادی"
             color = "#64748B"
             score = 0
-            
             if bb_width < 3.0:
                 status = "در حال جمع شدن انرژی (فشردگی)"
                 color = "#F59E0B"
                 score = int(85 - (bb_width * 10)) 
                 if score < 50: score = 50
-
             if vol_ratio > 2.0: 
                 if rsi > 65 and current_price < current_open:
                     status = "هشدار دامپ (فروش نهنگ)"
                     color = "#EF4444"
                     score = min(100, int(70 + (vol_ratio * 5) + (rsi - 65)))
-                
                 elif rsi < 35 and current_price > current_open and not is_1h_downtrend:
                     status = "احتمال پامپ (خرید نهنگ)"
                     color = "#10B981"
                     score = min(100, int(70 + (vol_ratio * 5) + (35 - rsi)))
-                
                 elif rsi < 35 and (current_price < current_open or is_1h_downtrend):
                     status = "ادامه روند نزولی (مراقب باشید)"
                     color = "#F97316" 
                     score = 50
-
             results.append({
                 "symbol": sym.replace("USDT", ""), "price": current_price, "vol_ratio": round(vol_ratio, 2),
                 "bb_width": round(bb_width, 2), "rsi": round(rsi, 2), "status": status, "score": score, "color": color
             })
-        except Exception as e:
-            print(f"Error scanning {sym}: {e}")
-            
+        except Exception as e: print(f"Error scanning {sym}: {e}")
     return results
 
-# ================= ترد ۱: ربات معامله‌گر (با Trailing Stop) =================
+# ================= ترد ۱: ربات معامله‌گر =================
 def bot_logic_loop():
     while True:
         with app.app_context():
             state = BotState.query.first()
-            
             today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if state.last_reset_date != today_str:
                 state.daily_pnl_percent = 0.0
@@ -281,11 +260,9 @@ def bot_logic_loop():
                 try:
                     current_symbol = state.active_symbol
                     ohlc = get_ohlc_data(symbol=current_symbol)
-                    
                     if ohlc and len(ohlc['close']) > 0:
                         close_prices = ohlc['close']
                         current_price = close_prices[-1]
-                        
                         ema9 = calculate_ema(close_prices, 9)
                         ema21 = calculate_ema(close_prices, 21)
                         supertrend = calculate_supertrend(ohlc['high'], ohlc['low'], close_prices)
@@ -293,15 +270,12 @@ def bot_logic_loop():
                         atr = calculate_atr(ohlc['high'], ohlc['low'], close_prices, 14)
                         
                         if ema9 and ema21 and supertrend and macd is not None and atr:
-                            # باز کردن پوزیشن جدید
                             if not state.in_position and ema9 > ema21 and supertrend == 1 and macd > 0:
                                 balance = get_account_balance()
                                 sl_price = current_price - (atr * 1.5)
                                 price_diff = abs(current_price - sl_price)
-                                
                                 raw_size = (balance * RISK_PER_TRADE_PERCENT) / price_diff if price_diff > 0 else 0
                                 size = math.floor(raw_size * 1e6) / 1e6 
-                                
                                 if size > 0:
                                     state.in_position = True
                                     state.position_type = "long"
@@ -313,15 +287,12 @@ def bot_logic_loop():
                                     msg = "ربات معامله‌گر: LONG " + current_symbol + " باز شد! ورود: " + str(current_price) + " SL: " + str(sl_price)
                                     add_log("LONG Opened on " + current_symbol)
                                     send_bale_notification(msg)
-                            
                             elif not state.in_position and ema9 < ema21 and supertrend == -1 and macd < 0:
                                 balance = get_account_balance()
                                 sl_price = current_price + (atr * 1.5)
                                 price_diff = abs(sl_price - current_price)
-                                
                                 raw_size = (balance * RISK_PER_TRADE_PERCENT) / price_diff if price_diff > 0 else 0
                                 size = math.floor(raw_size * 1e6) / 1e6
-                                
                                 if size > 0:
                                     state.in_position = True
                                     state.position_type = "short"
@@ -333,66 +304,60 @@ def bot_logic_loop():
                                     msg = "ربات معامله‌گر: SHORT " + current_symbol + " باز شد! ورود: " + str(current_price) + " SL: " + str(sl_price)
                                     add_log("SHORT Opened on " + current_symbol)
                                     send_bale_notification(msg)
-
-                            # مدیریت پوزیشن باز (شامل Trailing Stop)
                             elif state.in_position:
-                                # بخش Trailing Stop برای LONG
                                 if state.position_type == "long":
                                     if current_price > state.entry_price * 1.015 and state.stop_loss < state.entry_price:
                                         state.stop_loss = state.entry_price
                                         db.session.commit()
                                         add_log("Trailing Stop: SL moved to Breakeven (Long)")
-                                    
                                     new_sl = current_price - (atr * 1.5)
                                     if new_sl > state.stop_loss and current_price > state.entry_price:
                                         state.stop_loss = new_sl
                                         db.session.commit()
                                         add_log("Trailing Stop updated (Long)")
-                                
-                                # بخش Trailing Stop برای SHORT
                                 elif state.position_type == "short":
                                     if current_price < state.entry_price * 0.985 and state.stop_loss > state.entry_price:
                                         state.stop_loss = state.entry_price
                                         db.session.commit()
                                         add_log("Trailing Stop: SL moved to Breakeven (Short)")
-                                    
                                     new_sl = current_price + (atr * 1.5)
                                     if new_sl < state.stop_loss and current_price < state.entry_price:
                                         state.stop_loss = new_sl
                                         db.session.commit()
                                         add_log("Trailing Stop updated (Short)")
 
-                                # چک کردن برخورد با حد ضرر یا حد سود
                                 if (state.position_type == "long" and current_price <= state.stop_loss) or \
                                    (state.position_type == "short" and current_price >= state.stop_loss):
                                     
-                                    pnl = ((current_price - state.entry_price) / state.entry_price) * 100 if state.position_type == "long" else ((state.entry_price - current_price) / state.entry_price) * 100
+                                    # 🆕 محاسبه سود با کسر کارمزد
+                                    raw_pnl = ((current_price - state.entry_price) / state.entry_price) * 100 if state.position_type == "long" else ((state.entry_price - current_price) / state.entry_price) * 100
+                                    pnl = raw_pnl - FEE_PERCENT 
+                                    
                                     new_trade = TradeHistory(symbol=current_symbol, trade_type=state.position_type, entry_price=state.entry_price, exit_price=current_price, pnl_percent=pnl, date=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"))
                                     db.session.add(new_trade)
-                                    
-                                    add_log("STOP LOSS HIT!")
-                                    send_bale_notification("ربات معامله‌گر: حد ضرر فعال شد.")
+                                    add_log("STOP LOSS HIT! PnL after fees: " + str(round(pnl, 2)) + "%")
+                                    send_bale_notification("ربات معامله‌گر: حد ضرر فعال شد. (PnL خالص: " + str(round(pnl, 2)) + "%)")
                                     state.in_position = False
                                     state.daily_pnl_percent += pnl 
                                     db.session.commit()
-                                
                                 elif (state.position_type == "long" and current_price >= state.take_profit) or \
                                      (state.position_type == "short" and current_price <= state.take_profit):
                                     
-                                    pnl = ((current_price - state.entry_price) / state.entry_price) * 100 if state.position_type == "long" else ((state.entry_price - current_price) / state.entry_price) * 100
+                                    # 🆕 محاسبه سود با کسر کارمزد
+                                    raw_pnl = ((current_price - state.entry_price) / state.entry_price) * 100 if state.position_type == "long" else ((state.entry_price - current_price) / state.entry_price) * 100
+                                    pnl = raw_pnl - FEE_PERCENT
+                                    
                                     new_trade = TradeHistory(symbol=current_symbol, trade_type=state.position_type, entry_price=state.entry_price, exit_price=current_price, pnl_percent=pnl, date=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"))
                                     db.session.add(new_trade)
-                                    
-                                    add_log("TAKE PROFIT HIT!")
-                                    send_bale_notification("ربات معامله‌گر: حد سود فعال شد.")
+                                    add_log("TAKE PROFIT HIT! PnL after fees: " + str(round(pnl, 2)) + "%")
+                                    send_bale_notification("ربات معامله‌گر: حد سود فعال شد. (PnL خالص: " + str(round(pnl, 2)) + "%)")
                                     state.in_position = False
                                     state.daily_pnl_percent += pnl 
                                     db.session.commit()
                             else:
                                 add_log("Analyzing " + current_symbol + "... Price: " + str(current_price))
-                except Exception as e:
-                    add_log(f"Loop Error: {e}")
-        time.sleep(15)
+                except Exception as e: add_log(f"Loop Error: {e}")
+        time.sleep(5) # 🆕 کاهش زمان به 5 ثانیه برای واکنش سریع‌تر
 
 # ================= ترد ۲: اسکنر خودکار پامپ و دامپ =================
 last_alerts = {} 
@@ -403,24 +368,17 @@ def pump_dump_auto_loop():
         try:
             results = perform_pump_dump_scan()
             current_time = time.time()
-            
             for item in results:
-                if item['score'] >= 95: 
+                if item['score'] >= 95:
                     sym = item['symbol']
-                    if sym not in last_alerts or (current_time - last_alerts[sym] > 14400): 
-                        # خط زیر به چند تکه تقسیم شد تا کپی‌پیست خراب نشود
+                    if sym not in last_alerts or (current_time - last_alerts[sym] > 14400):
                         status_text = str(item['status'])
                         price_text = str(round(item['price'], 4))
                         score_text = str(item['score'])
-                        
-                        msg = "رادار پامپ/دامپ: " + status_text + " برای " + sym + " | قیمت: " + price_text + " | احتمال: " + score_text
-                        
+                        msg = "رادار پامپ/دامپ: " + status_text + " برای " + sym + " | قیمت: " + price_text + " | احتمال: " + score_text + "%"
                         send_bale_notification(msg)
                         last_alerts[sym] = current_time 
-                        
-        except Exception as e:
-            print(f"Pump Dump Loop Error: {e}")
-            
+        except Exception as e: print(f"Pump Dump Loop Error: {e}")
         time.sleep(300) 
 
 # ================= اجرای تردها =================
@@ -468,7 +426,7 @@ def toggle_bot():
         return jsonify({"status": "error", "message": "ترمز اضطراری فعال است!"}), 400
     state.is_active = not state.is_active
     db.session.commit()
-    add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
+    add_log("User turned the bot " + ("ON" if state.is_active else "OFF"))
     return jsonify({"status": "success", "is_active": state.is_active})
 
 @app.route('/set_symbol', methods=['POST'])
@@ -480,7 +438,7 @@ def set_symbol():
     new_symbol = data.get('symbol')
     if new_symbol:
         state.active_symbol = new_symbol
-        state.logs = f"Switched to {new_symbol}."
+        state.logs = "Switched to " + new_symbol
         db.session.commit()
         return jsonify({"status": "success", "symbol": new_symbol})
     return jsonify({"status": "error", "message": "ارز نامعتبر است."}), 400
@@ -503,7 +461,6 @@ def api_scan_pump_dump():
 def analyze_chart():
     if request.method == 'OPTIONS': return jsonify({"status": "ok"}), 200
     if 'image' not in request.files: return jsonify({"error": "عکسی ارسال نشده است."}), 400
-    
     try:
         file = request.files['image']
         img = PIL.Image.open(io.BytesIO(file.read()))
@@ -513,7 +470,6 @@ def analyze_chart():
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
         
         prompt = "You are a technical analyst. Analyze the chart image and provide a comprehensive analysis in Persian (with new lines for each section): 1. Overall Trend 2. Support & Resistance 3. Indicators 4. Patterns 5. Trading Plan. Keep it concise."
-        
         gemini_err = ""
         groq_err = ""
         ai_text = ""
@@ -522,8 +478,7 @@ def analyze_chart():
             try:
                 response = gemini_client.models.generate_content(model='gemini-2.5-flash', contents=[prompt, img])
                 ai_text = response.text
-            except Exception as e: 
-                gemini_err = str(e)
+            except Exception as e: gemini_err = str(e)
             
         if not ai_text and GROQ_API_KEY:
             try:
@@ -535,17 +490,11 @@ def analyze_chart():
                 choices = response.choices
                 message = choices[0].message
                 ai_text = message.content
-            except Exception as e: 
-                groq_err = str(e)
+            except Exception as e: groq_err = str(e)
             
-        if ai_text:
-            return jsonify({"analysis": ai_text})
-        else:
-            error_msg = "AI Failed. Gemini: " + gemini_err[:30] + " | Groq: " + groq_err[:30]
-            return jsonify({"error": error_msg}), 500
-        
-    except Exception as e:
-        return jsonify({"error": "Server Error: " + str(e)}), 500
+        if ai_text: return jsonify({"analysis": ai_text})
+        else: return jsonify({"error": "AI Failed. G: " + gemini_err[:20] + " | Q: " + groq_err[:20]}), 500
+    except Exception as e: return jsonify({"error": "Server Error: " + str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
