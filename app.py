@@ -310,8 +310,8 @@ def bot_logic_loop():
                                     state.take_profit = current_price + (atr * 3)
                                     state.position_size = size
                                     db.session.commit()
-                                    msg = f"ربات معامله‌گر: LONG {current_symbol} باز شد! ورود: {current_price:.2f} SL: {sl_price:.2f} حجم: {size}"
-                                    add_log(f"LONG Opened on {current_symbol}.")
+                                    msg = "ربات معامله‌گر: LONG " + current_symbol + " باز شد! ورود: " + str(current_price) + " SL: " + str(sl_price)
+                                    add_log("LONG Opened on " + current_symbol)
                                     send_bale_notification(msg)
                             
                             elif not state.in_position and ema9 < ema21 and supertrend == -1 and macd < 0:
@@ -330,28 +330,26 @@ def bot_logic_loop():
                                     state.take_profit = current_price - (atr * 3)
                                     state.position_size = size
                                     db.session.commit()
-                                    msg = f"ربات معامله‌گر: SHORT {current_symbol} باز شد! ورود: {current_price:.2f} SL: {sl_price:.2f} حجم: {size}"
-                                    add_log(f"SHORT Opened on {current_symbol}.")
+                                    msg = "ربات معامله‌گر: SHORT " + current_symbol + " باز شد! ورود: " + str(current_price) + " SL: " + str(sl_price)
+                                    add_log("SHORT Opened on " + current_symbol)
                                     send_bale_notification(msg)
 
                             # مدیریت پوزیشن باز (شامل Trailing Stop)
                             elif state.in_position:
-                                # 🆕 بخش Trailing Stop برای LONG
+                                # بخش Trailing Stop برای LONG
                                 if state.position_type == "long":
-                                    # 1. حد ضرر روی نقطه ورود (Breakeven) اگر 1.5% سود کردیم
                                     if current_price > state.entry_price * 1.015 and state.stop_loss < state.entry_price:
                                         state.stop_loss = state.entry_price
                                         db.session.commit()
                                         add_log("Trailing Stop: SL moved to Breakeven (Long)")
                                     
-                                    # 2. حد ضرر متحرک بر اساس ATR
                                     new_sl = current_price - (atr * 1.5)
                                     if new_sl > state.stop_loss and current_price > state.entry_price:
                                         state.stop_loss = new_sl
                                         db.session.commit()
-                                        add_log(f"Trailing Stop updated (Long) to {new_sl:.2f}")
+                                        add_log("Trailing Stop updated (Long)")
                                 
-                                # 🆕 بخش Trailing Stop برای SHORT
+                                # بخش Trailing Stop برای SHORT
                                 elif state.position_type == "short":
                                     if current_price < state.entry_price * 0.985 and state.stop_loss > state.entry_price:
                                         state.stop_loss = state.entry_price
@@ -362,7 +360,7 @@ def bot_logic_loop():
                                     if new_sl < state.stop_loss and current_price < state.entry_price:
                                         state.stop_loss = new_sl
                                         db.session.commit()
-                                        add_log(f"Trailing Stop updated (Short) to {new_sl:.2f}")
+                                        add_log("Trailing Stop updated (Short)")
 
                                 # چک کردن برخورد با حد ضرر یا حد سود
                                 if (state.position_type == "long" and current_price <= state.stop_loss) or \
@@ -373,7 +371,7 @@ def bot_logic_loop():
                                     db.session.add(new_trade)
                                     
                                     add_log("STOP LOSS HIT!")
-                                    send_bale_notification(f"ربات معامله‌گر: حد ضرر فعال شد. (PnL: {pnl:.2f}%)")
+                                    send_bale_notification("ربات معامله‌گر: حد ضرر فعال شد.")
                                     state.in_position = False
                                     state.daily_pnl_percent += pnl 
                                     db.session.commit()
@@ -386,12 +384,12 @@ def bot_logic_loop():
                                     db.session.add(new_trade)
                                     
                                     add_log("TAKE PROFIT HIT!")
-                                    send_bale_notification(f"ربات معامله‌گر: حد سود فعال شد. (PnL: {pnl:.2f}%)")
+                                    send_bale_notification("ربات معامله‌گر: حد سود فعال شد.")
                                     state.in_position = False
                                     state.daily_pnl_percent += pnl 
                                     db.session.commit()
                             else:
-                                add_log(f"Analyzing {current_symbol}... Price: {current_price:.2f}")
+                                add_log("Analyzing " + current_symbol + "... Price: " + str(current_price))
                 except Exception as e:
                     add_log(f"Loop Error: {e}")
         time.sleep(15)
@@ -410,12 +408,12 @@ def pump_dump_auto_loop():
                 if item['score'] >= 95: 
                     sym = item['symbol']
                     if sym not in last_alerts or (current_time - last_alerts[sym] > 14400): 
-                        # 🆕 خطوط طولانی به چند خط ساده تقسیم شدند تا کپی‌پیست خراب نشود
+                        # خط زیر به چند تکه تقسیم شد تا کپی‌پیست خراب نشود
                         status_text = str(item['status'])
                         price_text = str(round(item['price'], 4))
                         score_text = str(item['score'])
                         
-                        msg = "رادار پامپ/دامپ: سیگنال " + status_text + " برای " + sym + " | قیمت: " + price_text + " | احتمال: " + score_text + "%"
+                        msg = "رادار پامپ/دامپ: " + status_text + " برای " + sym + " | قیمت: " + price_text + " | احتمال: " + score_text
                         
                         send_bale_notification(msg)
                         last_alerts[sym] = current_time 
@@ -424,3 +422,130 @@ def pump_dump_auto_loop():
             print(f"Pump Dump Loop Error: {e}")
             
         time.sleep(300) 
+
+# ================= اجرای تردها =================
+threads_started = False
+@app.before_request
+def start_background_threads():
+    global threads_started
+    if not threads_started:
+        threading.Thread(target=bot_logic_loop, daemon=True).start()
+        threading.Thread(target=pump_dump_auto_loop, daemon=True).start()
+        threads_started = True
+
+# ================= API Routes =================
+@app.route('/status', methods=['GET'])
+def get_status():
+    state = BotState.query.first()
+    return jsonify({
+        "is_active": state.is_active, "in_position": state.in_position, 
+        "position_type": state.position_type, "entry_price": state.entry_price,
+        "stop_loss": state.stop_loss, "take_profit": state.take_profit,
+        "position_size": state.position_size, "active_symbol": state.active_symbol,
+        "daily_pnl": round(state.daily_pnl_percent, 2),
+        "logs": state.logs.split('\n')
+    })
+
+@app.route('/journal', methods=['GET'])
+def get_journal():
+    trades = TradeHistory.query.order_by(TradeHistory.id.desc()).all()
+    result = []
+    for t in trades:
+        result.append({
+            "symbol": t.symbol,
+            "type": t.trade_type,
+            "entry": t.entry_price,
+            "exit": t.exit_price,
+            "pnl": round(t.pnl_percent, 2),
+            "date": t.date
+        })
+    return jsonify(result)
+
+@app.route('/toggle', methods=['POST'])
+def toggle_bot():
+    state = BotState.query.first()
+    if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT and not state.is_active:
+        return jsonify({"status": "error", "message": "ترمز اضطراری فعال است!"}), 400
+    state.is_active = not state.is_active
+    db.session.commit()
+    add_log(f"User turned the bot {'ON' if state.is_active else 'OFF'}.")
+    return jsonify({"status": "success", "is_active": state.is_active})
+
+@app.route('/set_symbol', methods=['POST'])
+def set_symbol():
+    state = BotState.query.first()
+    if state.in_position:
+        return jsonify({"status": "error", "message": "شما پوزیشن باز دارید!"}), 400
+    data = request.json
+    new_symbol = data.get('symbol')
+    if new_symbol:
+        state.active_symbol = new_symbol
+        state.logs = f"Switched to {new_symbol}."
+        db.session.commit()
+        return jsonify({"status": "success", "symbol": new_symbol})
+    return jsonify({"status": "error", "message": "ارز نامعتبر است."}), 400
+
+@app.route('/close_position', methods=['POST'])
+def close_position():
+    state = BotState.query.first()
+    if state.in_position:
+        state.in_position = False
+        db.session.commit()
+        add_log("Panic Close Executed.")
+        return jsonify({"status": "success", "message": "Position closed."})
+    return jsonify({"status": "error", "message": "No open position."})
+
+@app.route('/scan_pump_dump', methods=['GET'])
+def api_scan_pump_dump():
+    return jsonify(perform_pump_dump_scan())
+
+@app.route('/analyze', methods=['POST', 'OPTIONS'])
+def analyze_chart():
+    if request.method == 'OPTIONS': return jsonify({"status": "ok"}), 200
+    if 'image' not in request.files: return jsonify({"error": "عکسی ارسال نشده است."}), 400
+    
+    try:
+        file = request.files['image']
+        img = PIL.Image.open(io.BytesIO(file.read()))
+        img.thumbnail((800, 800))
+        buffered = io.BytesIO()
+        img.convert('RGB').save(buffered, format="JPEG")
+        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        
+        prompt = "You are a technical analyst. Analyze the chart image and provide a comprehensive analysis in Persian (with new lines for each section): 1. Overall Trend 2. Support & Resistance 3. Indicators 4. Patterns 5. Trading Plan. Keep it concise."
+        
+        gemini_err = ""
+        groq_err = ""
+        ai_text = ""
+
+        if GEMINI_API_KEY:
+            try:
+                response = gemini_client.models.generate_content(model='gemini-2.5-flash', contents=[prompt, img])
+                ai_text = response.text
+            except Exception as e: 
+                gemini_err = str(e)
+            
+        if not ai_text and GROQ_API_KEY:
+            try:
+                response = groq_client.chat.completions.create(
+                    model="meta-llama/llama-4-scout-17b-16e-instruct", 
+                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64_image}}]}],
+                    temperature=0.5, max_tokens=1000
+                )
+                choices = response.choices
+                message = choices[0].message
+                ai_text = message.content
+            except Exception as e: 
+                groq_err = str(e)
+            
+        if ai_text:
+            return jsonify({"analysis": ai_text})
+        else:
+            error_msg = "AI Failed. Gemini: " + gemini_err[:30] + " | Groq: " + groq_err[:30]
+            return jsonify({"error": error_msg}), 500
+        
+    except Exception as e:
+        return jsonify({"error": "Server Error: " + str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
