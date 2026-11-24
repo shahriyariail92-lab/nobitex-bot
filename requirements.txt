@@ -1,7 +1,8 @@
 Flask
 Flask-Cors
-Flask-SQLAlchemy
-psycopg2
+Flask-SQLAlchemy==3.1.1
+SQLAlchemy>=2.0.44,<2.1
+psycopg[binary]
 requests
 gunicorn
 google-genai
