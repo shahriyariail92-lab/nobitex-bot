@@ -40,8 +40,9 @@ BALE_BOT_TOKEN = os.environ.get('BALE_BOT_TOKEN', '')
 BALE_CHAT_ID = os.environ.get('BALE_CHAT_ID', '')
 NOBITEX_API_TOKEN = os.environ.get('NOBITEX_API_TOKEN', '')
 
-# ================= دیتابیس =================
+# ================= تنظیمات دیتابیس =================
 db_url_str = os.environ.get('DATABASE_URL', 'sqlite:///local.db').strip()
+
 if db_url_str.startswith("postgres://"):
     db_url_str = db_url_str.replace("postgres://", "postgresql+psycopg2://", 1)
 elif db_url_str.startswith("postgresql://") and not db_url_str.startswith("postgresql+psycopg2://"):
@@ -61,7 +62,7 @@ class BotState(db.Model):
     take_profit = db.Column(db.Float, default=0.0)
     position_size = db.Column(db.Float, default=0.0)
     active_symbol = db.Column(db.String(20), default="BTCUSDT") 
-    active_strategy = db.Column(db.String(20), default="ema") # 🆕 استراتژی فعال
+    active_strategy = db.Column(db.String(20), default="ema")
     daily_pnl_percent = db.Column(db.Float, default=0.0) 
     last_reset_date = db.Column(db.String(20), default="") 
     logs = db.Column(db.Text, default="[System] Database initialized.")
@@ -82,7 +83,7 @@ with app.app_context():
         db.session.commit()
 
 # ================= حافظه اشتراکی رادار =================
-radar_memory = {} # برای ذخیره آخرین وضعیت رادار برای هر ارز
+radar_memory = {} 
 
 # ================= توابع کمکی =================
 def add_log(message):
@@ -155,7 +156,6 @@ def execute_nobitex_order(order_type, amount, price=0):
     url = "https://apiv2.nobitex.ir/orders/add"
     headers = {"Authorization": f"Token {NOBITEX_API_TOKEN}"}
     
-    # استفاده از سفارش Market برای سرعت بالا در بستن فوری
     data = {
         "type": order_type,
         "srcCurrency": base_currency,
@@ -202,7 +202,6 @@ def calculate_macd(prices):
     if ema_fast is None or ema_slow is None: return None, None
     
     macd_line = ema_fast - ema_slow
-    # محاسبه سیگنال لاین ساده شده (برای سادگی از میانگین متحرک 9 دوره ای روی مکدی استفاده نشده و صرفا جهت شبیه سازی است)
     signal_line = macd_line * 0.9 
     return macd_line, signal_line
 
@@ -280,7 +279,6 @@ def perform_pump_dump_scan():
                 "bb_width": round(bb_width, 2), "rsi": round(rsi, 2), "status": status, "score": score, "color": color
             })
             
-            # 🆕 ذخیره در حافظه برای استفاده ربات
             radar_memory[sym] = {"status": status, "score": score, "time": time.time()}
             
         except Exception as e: print(f"Error scanning {sym}: {e}")
@@ -313,13 +311,11 @@ def bot_logic_loop():
                         close_prices = ohlc['close']
                         current_price = close_prices[-1]
                         
-                        # 🆕 بررسی وضعیت رادار برای همگام‌سازی
                         radar_signal = radar_memory.get(current_symbol, {"status": "عادی", "score": 0, "time": 0})
-                        is_radar_fresh = (time.time() - radar_signal["time"]) < 600 # معتبر تا ۱۰ دقیقه
+                        is_radar_fresh = (time.time() - radar_signal["time"]) < 600
                         radar_force_short = is_radar_fresh and radar_signal["score"] >= 90 and "دامپ" in radar_signal["status"]
                         radar_force_long = is_radar_fresh and radar_signal["score"] >= 90 and "پامپ" in radar_signal["status"]
 
-                        # منطق استراتژی‌ها
                         if not state.in_position:
                             signal = None
                             strategy = state.active_strategy
@@ -340,7 +336,6 @@ def bot_logic_loop():
                                     if macd_line > signal_line: signal = "long"
                                     elif macd_line < signal_line: signal = "short"
 
-                            # 🆕 همگام‌سازی با رادار (رادار اولویت دارد)
                             if radar_force_short: signal = "short"
                             elif radar_force_long: signal = "long"
 
@@ -379,7 +374,6 @@ def bot_logic_loop():
 
                         elif state.in_position:
                             atr = calculate_atr(ohlc['high'], ohlc['low'], close_prices, 14)
-                            # مدیریت Trailing Stop
                             if state.position_type == "long":
                                 if current_price > state.entry_price * 1.015 and state.stop_loss < state.entry_price:
                                     state.stop_loss = state.entry_price
@@ -403,7 +397,6 @@ def bot_logic_loop():
                                         db.session.commit()
                                         add_log("Trailing Stop updated (Short)")
 
-                            # چک کردن برخورد با SL یا TP
                             if (state.position_type == "long" and current_price <= state.stop_loss) or \
                                (state.position_type == "short" and current_price >= state.stop_loss):
                                 if execute_nobitex_order("sell" if state.position_type == "long" else "buy", state.position_size, current_price):
@@ -499,7 +492,6 @@ def set_symbol():
         return jsonify({"status": "success", "symbol": data['symbol']})
     return jsonify({"status": "error", "message": "ارز نامعتبر"}), 400
 
-# 🆕 API تغییر استراتژی
 @app.route('/set_strategy', methods=['POST'])
 def set_strategy():
     state = BotState.query.first()
@@ -515,7 +507,6 @@ def set_strategy():
 def close_position():
     state = BotState.query.first()
     if state.in_position:
-        # 🆕 ارسال سفارش واقعی در صورت خاموش بودن تست
         order_type = "sell" if state.position_type == "long" else "buy"
         if execute_nobitex_order(order_type, state.position_size, 0):
             state.in_position = False
