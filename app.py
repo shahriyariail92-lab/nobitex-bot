@@ -44,9 +44,9 @@ NOBITEX_API_TOKEN = os.environ.get('NOBITEX_API_TOKEN', '')
 db_url_str = os.environ.get('DATABASE_URL', 'sqlite:///local.db').strip()
 
 if db_url_str.startswith("postgres://"):
-    db_url_str = db_url_str.replace("postgres://", "postgresql+psycopg2://", 1)
-elif db_url_str.startswith("postgresql://") and not db_url_str.startswith("postgresql+psycopg2://"):
-    db_url_str = db_url_str.replace("postgresql://", "postgresql+psycopg2://", 1)
+    db_url_str = db_url_str.replace("postgres://", "postgresql+psycopg://", 1)
+elif db_url_str.startswith("postgresql://") and not db_url_str.startswith("postgresql+psycopg://"):
+    db_url_str = db_url_str.replace("postgresql://", "postgresql+psycopg://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url_str
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
