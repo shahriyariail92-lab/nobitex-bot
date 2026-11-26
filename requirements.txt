@@ -6,3 +6,4 @@ google-genai
 groq
 Pillow
 requests
+gunicorn==21.2.0
