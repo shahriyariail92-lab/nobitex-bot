@@ -77,8 +77,31 @@ class TradeHistory(db.Model):
     pnl_percent = db.Column(db.Float)
     date = db.Column(db.String(30))
 
+# ================= توابع کمکی دیتابیس =================
+def get_state():
+    state = BotState.query.first()
+    if not state:
+        state = BotState()
+        db.session.add(state)
+        db.session.commit()
+    return state
+
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+        # تست خواندن جدول برای بررسی اینکه آیا ستون‌های جدید (مثل consecutive_losses) وجود دارند یا نه
+        BotState.query.first()
+    except Exception as e:
+        print(f"Schema mismatch detected: {e}. Recreating BotState table...")
+        try:
+            # اگر جدول قدیمی بود، فقط جدول وضعیت را پاک و مجدد می‌سازیم
+            BotState.__table__.drop(db.engine)
+            db.create_all()
+            print("BotState table successfully recreated.")
+        except Exception as drop_e:
+            print(f"Failed to recreate table: {drop_e}")
+            
+    # مقداردهی اولیه
     if not BotState.query.first():
         db.session.add(BotState())
         db.session.commit()
@@ -88,7 +111,7 @@ radar_memory = {}
 
 # ================= توابع کمکی =================
 def add_log(message):
-    state = BotState.query.first()
+    state = get_state()
     timestamp = time.strftime("%H:%M:%S")
     new_log = f"[{timestamp}] {message}"
     current_logs = state.logs.split('\n') if state.logs else []
@@ -143,7 +166,7 @@ def get_ohlc_data(symbol, resolution=60, limit=50):
     return None
 
 def execute_nobitex_order(order_type, amount, price=0):
-    state = BotState.query.first()
+    state = get_state()
     base_currency = state.active_symbol.replace("USDT", "").lower()
 
     if TEST_MODE:
@@ -213,7 +236,6 @@ def calculate_atr(highs, lows, closes, period=14):
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
 
-# 🆕 محاسبه ADX برای تشخیص قدرت روند
 def calculate_adx(highs, lows, closes, period=14):
     if len(closes) < period * 2: return 0
     tr_list, plus_dm, minus_dm = [], [], []
@@ -231,7 +253,7 @@ def calculate_adx(highs, lows, closes, period=14):
     plus_di = (sum(plus_dm[-period:]) / period) / atr * 100
     minus_di = (sum(minus_dm[-period:]) / period) / atr * 100
     dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
-    return dx # مقدار تقریبی ADX (اگر بالای ۲۵ باشد یعنی روند قوی است)
+    return dx
 
 # ================= هسته اسکنر پامپ و دامپ =================
 def perform_pump_dump_scan():
@@ -308,11 +330,11 @@ def perform_pump_dump_scan():
 def bot_logic_loop():
     while True:
         with app.app_context():
-            state = BotState.query.first()
+            state = get_state()
             today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if state.last_reset_date != today_str:
                 state.daily_pnl_percent = 0.0
-                state.consecutive_losses = 0 # 🆕 ریست روزانه ضررهای متوالی
+                state.consecutive_losses = 0 
                 state.last_reset_date = today_str
                 db.session.commit()
                 add_log("Daily PnL and Loss Counter Reset to 0%.")
@@ -325,7 +347,7 @@ def bot_logic_loop():
                     add_log("CIRCUIT BREAKER TRIGGERED! Daily loss limit reached.")
                     send_bale_notification("ربات معامله‌گر: ترمز اضطراری (ضرر روزانه) فعال شد! ربات خاموش شد.")
             
-            # 🆕 ترمز اضطراری ضررهای متوالی
+            # ترمز اضطراری ضررهای متوالی
             if state.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
                 if state.is_active:
                     state.is_active = False
@@ -350,9 +372,9 @@ def bot_logic_loop():
                             signal = None
                             strategy = state.active_strategy
                             atr = calculate_atr(ohlc['high'], ohlc['low'], close_prices, 14)
-                            adx = calculate_adx(ohlc['high'], ohlc['low'], close_prices, 14) # 🆕 محاسبه ADX
+                            adx = calculate_adx(ohlc['high'], ohlc['low'], close_prices, 14)
                             
-                            # 🆕 فیلتر ADX: اگر روند ضعیف است (زیر ۲۵)، معامله نکن
+                            # فیلتر ADX: اگر روند ضعیف است (زیر ۲۵)، معامله نکن
                             if adx and adx < 25 and not radar_force_long and not radar_force_short:
                                 add_log(f"ADX is weak ({adx:.2f}). Ranging market. Skipping trade.")
                                 time.sleep(5)
@@ -443,7 +465,7 @@ def bot_logic_loop():
                                     send_bale_notification(f"ربات: حد ضرر فعال شد. (PnL: {round(pnl, 2)}%)")
                                     state.in_position = False
                                     state.daily_pnl_percent += pnl 
-                                    state.consecutive_losses += 1 # 🆕 افزایش شمارنده ضرر
+                                    state.consecutive_losses += 1
                                     db.session.commit()
                             
                             elif (state.position_type == "long" and current_price >= state.take_profit) or \
@@ -456,7 +478,7 @@ def bot_logic_loop():
                                     send_bale_notification(f"ربات: حد سود فعال شد. (PnL: {round(pnl, 2)}%)")
                                     state.in_position = False
                                     state.daily_pnl_percent += pnl 
-                                    state.consecutive_losses = 0 # 🆕 ریست شمارنده در صورت سود
+                                    state.consecutive_losses = 0
                                     db.session.commit()
 
                 except Exception as e: add_log(f"Loop Error: {e}")
@@ -493,7 +515,7 @@ def start_background_threads():
 # ================= API Routes =================
 @app.route('/status', methods=['GET'])
 def get_status():
-    state = BotState.query.first()
+    state = get_state()
     return jsonify({
         "is_active": state.is_active, "in_position": state.in_position, 
         "position_type": state.position_type, "entry_price": state.entry_price,
@@ -501,11 +523,10 @@ def get_status():
         "position_size": state.position_size, "active_symbol": state.active_symbol,
         "active_strategy": state.active_strategy,
         "daily_pnl": round(state.daily_pnl_percent, 2),
-        "consecutive_losses": state.consecutive_losses, # 🆕 ارسال به فرانت
-        "logs": state.logs.split('\n')
+        "consecutive_losses": state.consecutive_losses,
+        "logs": state.logs.split('\n') if state.logs else []
     })
 
-# 🆕 محاسبه Profit Factor در API ژورنال
 @app.route('/journal', methods=['GET'])
 def get_journal():
     trades = TradeHistory.query.order_by(TradeHistory.id.desc()).all()
@@ -525,13 +546,12 @@ def get_journal():
 
 @app.route('/toggle', methods=['POST'])
 def toggle_bot():
-    state = BotState.query.first()
+    state = get_state()
     
     if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT and not state.is_active:
         return jsonify({"status": "error", "message": "ترمز اضطراری (ضرر روزانه) فعال است! تا فردا صبر کنید."}), 400
         
     if state.consecutive_losses >= MAX_CONSECUTIVE_LOSSES and not state.is_active:
-        # 🆕 اجازه روشن کردن مجدد داده نمیشود مگر اینکه کاربر شمارنده را ریست کند (یا از طریق دکمه‌ای در فرانت)
         return jsonify({"status": "error", "message": f"ترمز اضطراری ({MAX_CONSECUTIVE_LOSSES} ضرر متوالی) فعال است! لطفاً یک معامله سودده دستی انجام دهید یا فردا تلاش کنید."}), 400
         
     state.is_active = not state.is_active
@@ -541,7 +561,7 @@ def toggle_bot():
 
 @app.route('/set_symbol', methods=['POST'])
 def set_symbol():
-    state = BotState.query.first()
+    state = get_state()
     if state.in_position: return jsonify({"status": "error", "message": "پوزیشن باز دارید!"}), 400
     data = request.json
     if data.get('symbol'):
@@ -552,7 +572,7 @@ def set_symbol():
 
 @app.route('/set_strategy', methods=['POST'])
 def set_strategy():
-    state = BotState.query.first()
+    state = get_state()
     if state.in_position: return jsonify({"status": "error", "message": "پوزیشن باز دارید!"}), 400
     data = request.json
     if data.get('strategy'):
@@ -563,7 +583,7 @@ def set_strategy():
 
 @app.route('/close_position', methods=['POST'])
 def close_position():
-    state = BotState.query.first()
+    state = get_state()
     if state.in_position:
         order_type = "sell" if state.position_type == "long" else "buy"
         if execute_nobitex_order(order_type, state.position_size, 0):
