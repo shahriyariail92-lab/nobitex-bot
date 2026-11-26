@@ -27,9 +27,9 @@ def after_request(response):
 # ================= تنظیمات اصلی =================
 TEST_MODE = True 
 RISK_PER_TRADE_PERCENT = 0.02
-MAX_SPREAD_PERCENT = 0.5 
 DAILY_DRAWDOWN_LIMIT = -3.0 
 FEE_PERCENT = 0.5 
+MAX_CONSECUTIVE_LOSSES = 3 # 🆕 حداکثر ضرر متوالی
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 if GEMINI_API_KEY: gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -40,13 +40,13 @@ BALE_BOT_TOKEN = os.environ.get('BALE_BOT_TOKEN', '')
 BALE_CHAT_ID = os.environ.get('BALE_CHAT_ID', '')
 NOBITEX_API_TOKEN = os.environ.get('NOBITEX_API_TOKEN', '')
 
-# ================= تنظیمات دیتابیس =================
+# ================= دیتابیس =================
 db_url_str = os.environ.get('DATABASE_URL', 'sqlite:///local.db').strip()
 
 if db_url_str.startswith("postgres://"):
-    db_url_str = db_url_str.replace("postgres://", "postgresql+psycopg://", 1)
-elif db_url_str.startswith("postgresql://") and not db_url_str.startswith("postgresql+psycopg://"):
-    db_url_str = db_url_str.replace("postgresql://", "postgresql+psycopg://", 1)
+    db_url_str = db_url_str.replace("postgres://", "postgresql+psycopg2://", 1)
+elif db_url_str.startswith("postgresql://") and not db_url_str.startswith("postgresql+psycopg2://"):
+    db_url_str = db_url_str.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url_str
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -64,6 +64,7 @@ class BotState(db.Model):
     active_symbol = db.Column(db.String(20), default="BTCUSDT") 
     active_strategy = db.Column(db.String(20), default="ema")
     daily_pnl_percent = db.Column(db.Float, default=0.0) 
+    consecutive_losses = db.Column(db.Integer, default=0) # 🆕 شمارش ضرر متوالی
     last_reset_date = db.Column(db.String(20), default="") 
     logs = db.Column(db.Text, default="[System] Database initialized.")
 
@@ -200,7 +201,6 @@ def calculate_macd(prices):
     ema_fast = calculate_ema(prices, 12)
     ema_slow = calculate_ema(prices, 26)
     if ema_fast is None or ema_slow is None: return None, None
-    
     macd_line = ema_fast - ema_slow
     signal_line = macd_line * 0.9 
     return macd_line, signal_line
@@ -212,6 +212,26 @@ def calculate_atr(highs, lows, closes, period=14):
         tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
         tr_list.append(tr)
     return sum(tr_list[-period:]) / period
+
+# 🆕 محاسبه ADX برای تشخیص قدرت روند
+def calculate_adx(highs, lows, closes, period=14):
+    if len(closes) < period * 2: return 0
+    tr_list, plus_dm, minus_dm = [], [], []
+    for i in range(1, len(closes)):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        tr_list.append(tr)
+        up_move = highs[i] - highs[i-1]
+        down_move = lows[i-1] - lows[i]
+        plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0)
+        minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0)
+
+    if len(tr_list) < period: return 0
+    atr = sum(tr_list[-period:]) / period
+    if atr == 0: return 0
+    plus_di = (sum(plus_dm[-period:]) / period) / atr * 100
+    minus_di = (sum(minus_dm[-period:]) / period) / atr * 100
+    dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) > 0 else 0
+    return dx # مقدار تقریبی ADX (اگر بالای ۲۵ باشد یعنی روند قوی است)
 
 # ================= هسته اسکنر پامپ و دامپ =================
 def perform_pump_dump_scan():
@@ -292,16 +312,26 @@ def bot_logic_loop():
             today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if state.last_reset_date != today_str:
                 state.daily_pnl_percent = 0.0
+                state.consecutive_losses = 0 # 🆕 ریست روزانه ضررهای متوالی
                 state.last_reset_date = today_str
                 db.session.commit()
-                add_log("Daily PnL Reset to 0%.")
+                add_log("Daily PnL and Loss Counter Reset to 0%.")
             
+            # ترمز اضطراری روزانه
             if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT:
                 if state.is_active:
                     state.is_active = False
                     db.session.commit()
-                    add_log("CIRCUIT BREAKER TRIGGERED!")
-                    send_bale_notification("ربات معامله‌گر: ترمز اضطراری فعال شد! ضرر روزانه به حد مجاز رسید.")
+                    add_log("CIRCUIT BREAKER TRIGGERED! Daily loss limit reached.")
+                    send_bale_notification("ربات معامله‌گر: ترمز اضطراری (ضرر روزانه) فعال شد! ربات خاموش شد.")
+            
+            # 🆕 ترمز اضطراری ضررهای متوالی
+            if state.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+                if state.is_active:
+                    state.is_active = False
+                    db.session.commit()
+                    add_log(f"CIRCUIT BREAKER TRIGGERED! {MAX_CONSECUTIVE_LOSSES} consecutive losses reached.")
+                    send_bale_notification(f"ربات معامله‌گر: ترمز اضطراری ({MAX_CONSECUTIVE_LOSSES} ضرر متوالی)! ربات خاموش شد. لطفاً بازار را بررسی کنید.")
             
             if state and state.is_active:
                 try:
@@ -319,8 +349,14 @@ def bot_logic_loop():
                         if not state.in_position:
                             signal = None
                             strategy = state.active_strategy
-                            
                             atr = calculate_atr(ohlc['high'], ohlc['low'], close_prices, 14)
+                            adx = calculate_adx(ohlc['high'], ohlc['low'], close_prices, 14) # 🆕 محاسبه ADX
+                            
+                            # 🆕 فیلتر ADX: اگر روند ضعیف است (زیر ۲۵)، معامله نکن
+                            if adx and adx < 25 and not radar_force_long and not radar_force_short:
+                                add_log(f"ADX is weak ({adx:.2f}). Ranging market. Skipping trade.")
+                                time.sleep(5)
+                                continue
                             
                             if strategy == "ema":
                                 ema9 = calculate_ema(close_prices, 9)
@@ -407,6 +443,7 @@ def bot_logic_loop():
                                     send_bale_notification(f"ربات: حد ضرر فعال شد. (PnL: {round(pnl, 2)}%)")
                                     state.in_position = False
                                     state.daily_pnl_percent += pnl 
+                                    state.consecutive_losses += 1 # 🆕 افزایش شمارنده ضرر
                                     db.session.commit()
                             
                             elif (state.position_type == "long" and current_price >= state.take_profit) or \
@@ -419,6 +456,7 @@ def bot_logic_loop():
                                     send_bale_notification(f"ربات: حد سود فعال شد. (PnL: {round(pnl, 2)}%)")
                                     state.in_position = False
                                     state.daily_pnl_percent += pnl 
+                                    state.consecutive_losses = 0 # 🆕 ریست شمارنده در صورت سود
                                     db.session.commit()
 
                 except Exception as e: add_log(f"Loop Error: {e}")
@@ -463,19 +501,39 @@ def get_status():
         "position_size": state.position_size, "active_symbol": state.active_symbol,
         "active_strategy": state.active_strategy,
         "daily_pnl": round(state.daily_pnl_percent, 2),
+        "consecutive_losses": state.consecutive_losses, # 🆕 ارسال به فرانت
         "logs": state.logs.split('\n')
     })
 
+# 🆕 محاسبه Profit Factor در API ژورنال
 @app.route('/journal', methods=['GET'])
 def get_journal():
     trades = TradeHistory.query.order_by(TradeHistory.id.desc()).all()
-    return jsonify([{"symbol": t.symbol, "type": t.trade_type, "entry": t.entry_price, "exit": t.exit_price, "pnl": round(t.pnl_percent, 2), "date": t.date} for t in trades])
+    
+    gross_profit = sum(t.pnl_percent for t in trades if t.pnl_percent > 0)
+    gross_loss = abs(sum(t.pnl_percent for t in trades if t.pnl_percent < 0))
+    
+    if gross_loss > 0:
+        profit_factor = round(gross_profit / gross_loss, 2)
+    else:
+        profit_factor = round(gross_profit, 2) if gross_profit > 0 else 0
+        
+    return jsonify({
+        "trades": [{"symbol": t.symbol, "type": t.trade_type, "entry": t.entry_price, "exit": t.exit_price, "pnl": round(t.pnl_percent, 2), "date": t.date} for t in trades],
+        "profit_factor": profit_factor
+    })
 
 @app.route('/toggle', methods=['POST'])
 def toggle_bot():
     state = BotState.query.first()
+    
     if state.daily_pnl_percent <= DAILY_DRAWDOWN_LIMIT and not state.is_active:
-        return jsonify({"status": "error", "message": "ترمز اضطراری فعال است!"}), 400
+        return jsonify({"status": "error", "message": "ترمز اضطراری (ضرر روزانه) فعال است! تا فردا صبر کنید."}), 400
+        
+    if state.consecutive_losses >= MAX_CONSECUTIVE_LOSSES and not state.is_active:
+        # 🆕 اجازه روشن کردن مجدد داده نمیشود مگر اینکه کاربر شمارنده را ریست کند (یا از طریق دکمه‌ای در فرانت)
+        return jsonify({"status": "error", "message": f"ترمز اضطراری ({MAX_CONSECUTIVE_LOSSES} ضرر متوالی) فعال است! لطفاً یک معامله سودده دستی انجام دهید یا فردا تلاش کنید."}), 400
+        
     state.is_active = not state.is_active
     db.session.commit()
     add_log("User turned the bot " + ("ON" if state.is_active else "OFF"))
