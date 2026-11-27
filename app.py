@@ -89,7 +89,7 @@ def get_state():
 with app.app_context():
     try:
         db.create_all()
-        # تست خواندن جدول برای بررسی اینکه آیا ستون‌های جدید (مثل consecutive_losses) وجود دارند یا نه
+        # تست خواندن جدول برای بررسی اینکه آیا ستون‌های جدید وجود دارند یا نه
         BotState.query.first()
     except Exception as e:
         print(f"Schema mismatch detected: {e}. Recreating BotState table...")
@@ -374,6 +374,12 @@ def bot_logic_loop():
                             atr = calculate_atr(ohlc['high'], ohlc['low'], close_prices, 14)
                             adx = calculate_adx(ohlc['high'], ohlc['low'], close_prices, 14)
                             
+                            # 🆕 فیلتر جدید: اگر بازار در حالت فشردگی است، معامله نکن
+                            if is_radar_fresh and "فشردگی" in radar_signal["status"] and not radar_force_long and not radar_force_short:
+                                add_log("Market is ranging (Squeeze). Skipping trade to avoid whipsaw.")
+                                time.sleep(5)
+                                continue
+
                             # فیلتر ADX: اگر روند ضعیف است (زیر ۲۵)، معامله نکن
                             if adx and adx < 25 and not radar_force_long and not radar_force_short:
                                 add_log(f"ADX is weak ({adx:.2f}). Ranging market. Skipping trade.")
@@ -400,7 +406,7 @@ def bot_logic_loop():
                             if signal and atr:
                                 balance = get_account_balance()
                                 if signal == "long":
-                                    sl_price = current_price - (atr * 1.5)
+                                    sl_price = current_price - (atr * 2.0) # 🆕 حد ضرر بازتر شد
                                     size = math.floor(((balance * RISK_PER_TRADE_PERCENT) / abs(current_price - sl_price)) * 1e6) / 1e6 if abs(current_price - sl_price) > 0 else 0
                                     if size > 0 and execute_nobitex_order("buy", size, current_price):
                                         state.in_position = True
@@ -414,7 +420,7 @@ def bot_logic_loop():
                                         add_log(msg)
                                         send_bale_notification(msg)
                                 elif signal == "short":
-                                    sl_price = current_price + (atr * 1.5)
+                                    sl_price = current_price + (atr * 2.0) # 🆕 حد ضرر بازتر شد
                                     size = math.floor(((balance * RISK_PER_TRADE_PERCENT) / abs(current_price - sl_price)) * 1e6) / 1e6 if abs(current_price - sl_price) > 0 else 0
                                     if size > 0 and execute_nobitex_order("sell", size, current_price):
                                         state.in_position = True
@@ -438,7 +444,7 @@ def bot_logic_loop():
                                     db.session.commit()
                                     add_log("Trailing Stop: SL moved to Breakeven (Long)")
                                 if atr:
-                                    new_sl = current_price - (atr * 1.5)
+                                    new_sl = current_price - (atr * 2.0) # 🆕 هماهنگ با حد ضرر اولیه
                                     if new_sl > state.stop_loss and current_price > state.entry_price:
                                         state.stop_loss = new_sl
                                         db.session.commit()
@@ -449,7 +455,7 @@ def bot_logic_loop():
                                     db.session.commit()
                                     add_log("Trailing Stop: SL moved to Breakeven (Short)")
                                 if atr:
-                                    new_sl = current_price + (atr * 1.5)
+                                    new_sl = current_price + (atr * 2.0) # 🆕 هماهنگ با حد ضرر اولیه
                                     if new_sl < state.stop_loss and current_price < state.entry_price:
                                         state.stop_loss = new_sl
                                         db.session.commit()
@@ -540,7 +546,16 @@ def get_journal():
         profit_factor = round(gross_profit, 2) if gross_profit > 0 else 0
         
     return jsonify({
-        "trades": [{"symbol": t.symbol, "type": t.trade_type, "entry": t.entry_price, "exit": t.exit_price, "pnl": round(t.pnl_percent, 2), "date": t.date} for t in trades],
+        "trades": [
+            {
+                "symbol": t.symbol, 
+                "type": t.trade_type, 
+                "entry": str(t.entry_price), # 🆕 تبدیل به رشته برای حفظ دقت اعشار
+                "exit": str(t.exit_price),   # 🆕 تبدیل به رشته برای حفظ دقت اعشار
+                "pnl": round(t.pnl_percent, 2), 
+                "date": t.date
+            } for t in trades
+        ],
         "profit_factor": profit_factor
     })
 
@@ -552,12 +567,22 @@ def toggle_bot():
         return jsonify({"status": "error", "message": "ترمز اضطراری (ضرر روزانه) فعال است! تا فردا صبر کنید."}), 400
         
     if state.consecutive_losses >= MAX_CONSECUTIVE_LOSSES and not state.is_active:
-        return jsonify({"status": "error", "message": f"ترمز اضطراری ({MAX_CONSECUTIVE_LOSSES} ضرر متوالی) فعال است! لطفاً یک معامله سودده دستی انجام دهید یا فردا تلاش کنید."}), 400
+        return jsonify({"status": "error", "message": f"ترمز اضطراری ({MAX_CONSECUTIVE_LOSSES} ضرر متوالی) فعال است! لطفاً دکمه ریست را بزنید یا فردا تلاش کنید."}), 400
         
     state.is_active = not state.is_active
     db.session.commit()
     add_log("User turned the bot " + ("ON" if state.is_active else "OFF"))
     return jsonify({"status": "success", "is_active": state.is_active})
+
+# 🆕 مسیر جدید برای ریست کردن ترمز اضطراری
+@app.route('/reset_breaker', methods=['POST'])
+def reset_breaker():
+    state = get_state()
+    state.consecutive_losses = 0
+    state.daily_pnl_percent = 0.0
+    db.session.commit()
+    add_log("Circuit Breaker Reset manually by user.")
+    return jsonify({"status": "success", "message": "ترمز اضطراری با موفقیت ریست شد."})
 
 @app.route('/set_symbol', methods=['POST'])
 def set_symbol():
