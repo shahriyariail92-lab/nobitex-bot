@@ -328,7 +328,7 @@ def perform_pump_dump_scan():
 
 # ================= ترد ۱: ربات معامله‌گر =================
 def bot_logic_loop():
-  last_squeeze_log_time = 0 # 🆕 اضافه شود
+    last_squeeze_log_time = 0 # 🆕 اضافه شود
     last_adx_log_time = 0     # 🆕 اضافه شود
     while True:
         with app.app_context():
