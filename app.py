@@ -328,6 +328,8 @@ def perform_pump_dump_scan():
 
 # ================= ترد ۱: ربات معامله‌گر =================
 def bot_logic_loop():
+  last_squeeze_log_time = 0 # 🆕 اضافه شود
+    last_adx_log_time = 0     # 🆕 اضافه شود
     while True:
         with app.app_context():
             state = get_state()
@@ -374,17 +376,21 @@ def bot_logic_loop():
                             atr = calculate_atr(ohlc['high'], ohlc['low'], close_prices, 14)
                             adx = calculate_adx(ohlc['high'], ohlc['low'], close_prices, 14)
                             
-                            # 🆕 فیلتر جدید: اگر بازار در حالت فشردگی است، معامله نکن
-                            if is_radar_fresh and "فشردگی" in radar_signal["status"] and not radar_force_long and not radar_force_short:
-                                add_log("Market is ranging (Squeeze). Skipping trade to avoid whipsaw.")
-                                time.sleep(5)
-                                continue
+# 🆕 فیلتر جدید: اگر بازار در حالت فشردگی است، معامله نکن
+if is_radar_fresh and "فشردگی" in radar_signal["status"] and not radar_force_long and not radar_force_short:
+    if time.time() - last_squeeze_log_time > 300: # هر ۵ دقیقه یکبار لاگ بده
+        add_log("Market is ranging (Squeeze). Skipping trade to avoid whipsaw.")
+        last_squeeze_log_time = time.time()
+    time.sleep(5)
+    continue
 
-                            # فیلتر ADX: اگر روند ضعیف است (زیر ۲۵)، معامله نکن
-                            if adx and adx < 25 and not radar_force_long and not radar_force_short:
-                                add_log(f"ADX is weak ({adx:.2f}). Ranging market. Skipping trade.")
-                                time.sleep(5)
-                                continue
+# فیلتر ADX: اگر روند ضعیف است (زیر ۲۵)، معامله نکن
+if adx and adx < 25 and not radar_force_long and not radar_force_short:
+    if time.time() - last_adx_log_time > 300: # هر ۵ دقیقه یکبار لاگ بده
+        add_log(f"ADX is weak ({adx:.2f}). Ranging market. Skipping trade.")
+        last_adx_log_time = time.time()
+    time.sleep(5)
+    continue
                             
                             if strategy == "ema":
                                 ema9 = calculate_ema(close_prices, 9)
